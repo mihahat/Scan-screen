@@ -1,14 +1,12 @@
-"""The two windows: a region picker and the translation overlay."""
+"""Windows: the region picker, the in-place translation overlay and a status toast."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QKeySequence, QPainter, QPen, QPixmap, QScreen
+from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QImage, QKeySequence, QPainter, QPen, QPixmap, QScreen
 from PyQt6.QtWidgets import QWidget
-
-from .ocr import TextBlock
 
 _OVERLAY_FLAGS = (
     Qt.WindowType.FramelessWindowHint
@@ -101,114 +99,141 @@ class RegionSelector(QWidget):
         self.cancelled.emit()
 
 
+
+_DESCENDERS = set("gjpqyQ,;()[]{}|@$")
+
+
+def em_per_box_height(text: str) -> float:
+    """Font size relative to the height of Tesseract's box around a line.
+
+    The box only spans the ink: about 1 em when letters hang below the
+    baseline (g, p, y), but only the cap height (~0.73 em) when none do.
+    """
+    return 1.0 if any(ch in _DESCENDERS for ch in text) else 1.3
+
+
+def pil_to_qimage(img) -> QImage:
+    img = img.convert("RGB")
+    data = img.tobytes()
+    return QImage(data, img.width, img.height, img.width * 3, QImage.Format.Format_RGB888).copy()
+
+
 @dataclass
 class _Placed:
-    rect: QRect
+    image: QImage
+    image_rect: QRectF   # where the cleaned background goes (logical px)
+    text_rect: QRect     # where the translation is written
     font: QFont
     text: str
+    color: QColor
+    fill: QColor
+    align: Qt.AlignmentFlag
+    ink_rect: QRect      # area the drawn text actually covers
+    overflows: bool      # text needed more room than the original had
 
 
-class TranslationOverlay(QWidget):
-    """Draws translated text over where the original text was.
+class ReplaceOverlay(QWidget):
+    """Covers the captured area and shows it with the text swapped for its translation.
 
-    Click or press Esc to dismiss; Ctrl+C copies the translation.
+    Only the patches are drawn; everywhere else the window is transparent, so
+    the real screen shows through. Click or Esc dismisses (unless the overlay is
+    click-through, then use the hotkey again); Ctrl+C copies the translation.
     """
 
     dismissed = pyqtSignal()
-    PAD = 3
+    MIN_FONT_PX = 8
 
-    def __init__(self, region: QRect, opacity: float = 0.96, font_family: str = ""):
-        super().__init__(None, _OVERLAY_FLAGS)
+    def __init__(self, area: QRect, click_through: bool = False, font_family: str = ""):
+        flags = _OVERLAY_FLAGS
+        if click_through:
+            flags |= Qt.WindowType.WindowTransparentForInput
+        super().__init__(None, flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.region = region
-        self.bg = QColor(18, 18, 20, round(255 * max(0.3, min(opacity, 1.0))))
+        self.setGeometry(area)
+        self.click_through = click_through
         self.font_family = font_family
         self.placed: list[_Placed] = []
-        self.message: str | None = None
-        self.setGeometry(region)
+        self.flash: str | None = None
 
-    # -- content -----------------------------------------------------------
-
-    def show_message(self, text: str, auto_close_ms: int = 0) -> None:
-        self.message = text
-        self.placed = []
-        self.setGeometry(self.region)
+    def set_patches(self, patches, dpr: float) -> None:
+        self.placed = [self._layout(p, dpr) for p in patches]
         self.update()
-        self._show()
-        if auto_close_ms:
-            QTimer.singleShot(auto_close_ms, self.close)
 
-    def show_translations(self, blocks: list[TextBlock], translations: list[str], dpr: float) -> None:
-        self.message = None
-        self.placed = []
-        bottom = self.region.height()
-        for block, text in zip(blocks, translations):
-            rect = QRect(round(block.x / dpr), round(block.y / dpr), round(block.w / dpr), round(block.h / dpr))
-            rect = rect.adjusted(-self.PAD, -self.PAD, self.PAD, self.PAD)
-            font, rect = self._fit(text, rect, start_px=max(9, round(block.line_height / dpr * 0.8)))
-            self.placed.append(_Placed(rect, font, text))
-            bottom = max(bottom, rect.bottom() + 1)
-        # Translations can be longer than the original; grow downwards if needed.
-        self.setGeometry(self.region.x(), self.region.y(), self.region.width(), bottom)
-        self.update()
-        self._show()
+    def _layout(self, patch, dpr: float) -> _Placed:
+        b = patch.block
+        image = pil_to_qimage(patch.image)
+        image_rect = QRectF(patch.x / dpr, patch.y / dpr, image.width() / dpr, image.height() / dpr)
+        box = QRect(round(b.x / dpr), round(b.y / dpr), max(1, round(b.w / dpr)), max(1, round(b.h / dpr)))
+        multi_line = len(b.lines) > 1
+        align = Qt.AlignmentFlag.AlignLeft | (Qt.AlignmentFlag.AlignTop if multi_line else Qt.AlignmentFlag.AlignVCenter)
+        start_px = max(self.MIN_FONT_PX, round(b.line_height / dpr * em_per_box_height(b.text)))
+        font, text_rect, overflows = self._fit(patch.translation, box, start_px, max(1, len(b.lines)))
+        ink = QFontMetrics(font).boundingRect(text_rect, int(Qt.TextFlag.TextWordWrap | align), patch.translation)
+        return _Placed(image, image_rect, text_rect, font, patch.translation,
+                       QColor(*patch.text_color), QColor(*patch.bg_color), align, ink, overflows)
+
+    def _base_font(self) -> QFont:
+        return QFont(self.font_family) if self.font_family else QFont()
+
+    def _fit(self, text: str, box: QRect, start_px: int, n_lines: int = 1) -> tuple[QFont, QRect, bool]:
+        """Largest size that fits the original box; if none does, grow the box.
+
+        Also reports whether the text overflows, i.e. wraps onto more lines than
+        the original had (then the extra area needs a background).
+        """
+        flags = int(Qt.TextFlag.TextWordWrap)
+        font = self._base_font()
+        # Allow a little extra width so short UI labels don't wrap needlessly.
+        roomy = box.adjusted(0, 0, max(4, box.width() // 10), 0)
+        for size in range(start_px, self.MIN_FONT_PX - 1, -1):
+            font.setPixelSize(size)
+            br = QFontMetrics(font).boundingRect(roomy, flags, text)
+            if br.width() <= roomy.width() and br.height() <= max(box.height(), size * 1.3):
+                lines = round(br.height() / QFontMetrics(font).lineSpacing())
+                return QFont(font), roomy, lines > n_lines
+        font.setPixelSize(self.MIN_FONT_PX)
+        tall = QRect(box.x(), box.y(), roomy.width(), 100_000)
+        br = QFontMetrics(font).boundingRect(tall, flags, text)
+        return QFont(font), QRect(box.x(), box.y(), roomy.width(), br.height()), True
 
     def translated_text(self) -> str:
         return "\n\n".join(p.text for p in self.placed)
 
-    def _fit(self, text: str, rect: QRect, start_px: int) -> tuple[QFont, QRect]:
-        """Largest font size (down to 9px) at which the text fits the box."""
-        flags = int(Qt.TextFlag.TextWordWrap)
-        inner = rect.adjusted(self.PAD, self.PAD, -self.PAD, -self.PAD)
-        font = QFont(self.font_family) if self.font_family else QFont()
-        for size in range(start_px, 8, -1):
-            font.setPixelSize(size)
-            br = QFontMetrics(font).boundingRect(inner, flags, text)
-            if br.height() <= inner.height() and br.width() <= inner.width():
-                return QFont(font), rect
-        # Still too long at the minimum size: keep the width, make the box taller.
-        font.setPixelSize(9)
-        tall = QRect(inner.x(), inner.y(), max(inner.width(), 40), 100_000)
-        br = QFontMetrics(font).boundingRect(tall, flags, text)
-        return QFont(font), QRect(rect.x(), rect.y(), max(rect.width(), 40 + 2 * self.PAD), br.height() + 2 * self.PAD)
-
-    # -- window plumbing -----------------------------------------------------
-
-    def _show(self) -> None:
+    def show_over_screen(self) -> None:
         self.show()
         self.raise_()
-        self.activateWindow()
-        self.setFocus()
+        if not self.click_through:
+            self.activateWindow()
+            self.setFocus()
 
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        if self.message is not None:
-            p.setPen(QPen(QColor(80, 170, 255), 2))
-            p.setBrush(QColor(18, 18, 20, 70))
-            p.drawRect(self.rect().adjusted(1, 1, -1, -1))
-            f = QFont(self.font_family) if self.font_family else QFont()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for item in self.placed:
+            # A translation longer than the original spills past the cleaned patch;
+            # give the spill a background (the patch is drawn over it right after).
+            if item.overflows:
+                p.fillRect(item.ink_rect.adjusted(-2, -2, 2, 2), item.fill)
+        for item in self.placed:
+            p.drawImage(item.image_rect, item.image)
+        for item in self.placed:
+            p.setPen(item.color)
+            p.setFont(item.font)
+            p.drawText(item.text_rect, int(Qt.TextFlag.TextWordWrap | item.align), item.text)
+        if self.flash:
+            f = self._base_font()
             f.setPixelSize(14)
-            fm = QFontMetrics(f)
-            label = fm.boundingRect(self.message).adjusted(-10, -6, 10, 6)
+            label = QFontMetrics(f).boundingRect(self.flash).adjusted(-10, -6, 10, 6)
             label.moveCenter(self.rect().center())
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(self.bg)
+            p.setBrush(QColor(18, 18, 20, 235))
             p.drawRoundedRect(label, 6, 6)
             p.setPen(QColor(240, 240, 240))
             p.setFont(f)
-            p.drawText(label, Qt.AlignmentFlag.AlignCenter, self.message)
-            return
-        for item in self.placed:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(self.bg)
-            p.drawRoundedRect(item.rect, 4, 4)
-            p.setPen(QColor(245, 245, 245))
-            p.setFont(item.font)
-            p.drawText(item.rect.adjusted(self.PAD, self.PAD, -self.PAD, -self.PAD),
-                       int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), item.text)
+            p.drawText(label, Qt.AlignmentFlag.AlignCenter, self.flash)
 
     def mousePressEvent(self, _e) -> None:
         self.close()
@@ -216,20 +241,43 @@ class TranslationOverlay(QWidget):
     def keyPressEvent(self, e) -> None:
         if e.matches(QKeySequence.StandardKey.Copy):
             QGuiApplication.clipboard().setText(self.translated_text())
-            self.show_message_flash("Copied")
+            self.flash = "Copied"
+            self.update()
+            QTimer.singleShot(600, self._clear_flash)
         elif e.key() == Qt.Key.Key_Escape:
             self.close()
 
-    def show_message_flash(self, text: str) -> None:
-        """Briefly show a message without discarding the translations."""
-        self.message = text
-        self.update()
-        QTimer.singleShot(600, self._clear_message)
-
-    def _clear_message(self) -> None:
-        self.message = None
+    def _clear_flash(self) -> None:
+        self.flash = None
         self.update()
 
     def closeEvent(self, e) -> None:
         self.dismissed.emit()
         super().closeEvent(e)
+
+
+class StatusToast(QWidget):
+    """Small message pill at the top of a screen ("Translating…", errors)."""
+
+    def __init__(self, screen_geo: QRect, text: str, auto_close_ms: int = 0):
+        super().__init__(None, _OVERLAY_FLAGS | Qt.WindowType.WindowTransparentForInput)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.text = text
+        f = QFont()
+        f.setPixelSize(14)
+        self.setFont(f)
+        w = min(screen_geo.width() - 40, QFontMetrics(f).horizontalAdvance(text) + 32)
+        self.setGeometry(screen_geo.x() + (screen_geo.width() - w) // 2, screen_geo.y() + 24, w, 34)
+        self.show()
+        if auto_close_ms:
+            QTimer.singleShot(auto_close_ms, self.close)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(18, 18, 20, 230))
+        p.drawRoundedRect(self.rect(), 17, 17)
+        p.setPen(QColor(240, 240, 240))
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text)

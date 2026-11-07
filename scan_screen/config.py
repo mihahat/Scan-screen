@@ -26,8 +26,10 @@ def config_path() -> Path:
 
 @dataclass
 class Config:
-    # Global shortcut in pynput syntax, e.g. "<ctrl>+<alt>+t" or "<cmd>+<shift>+t".
+    # Global shortcuts in pynput syntax, e.g. "<ctrl>+<alt>+t" or "<cmd>+<shift>+t".
+    # hotkey translates the whole screen (press again to hide); region_hotkey lets you pick an area.
     hotkey: str = "<ctrl>+<alt>+t"
+    region_hotkey: str = "<ctrl>+<alt>+r"
     # Tesseract language packs to read, joined with "+", e.g. "eng", "jpn", "eng+fra".
     ocr_languages: str = "eng"
     # Language codes for translation (ISO 639-1, e.g. "en", "de", "ja"). "auto" detects.
@@ -40,8 +42,10 @@ class Config:
     tesseract_cmd: str = ""
     # Words Tesseract is less confident about than this (0-100) are dropped.
     min_confidence: int = 40
-    # Overlay look.
-    overlay_opacity: float = 0.96
+    # Let mouse clicks pass through the translated overlay to the apps underneath.
+    # Then dismiss it with the hotkey instead of a click.
+    click_through: bool = False
+    # Font for translations; empty uses the system UI font.
     font_family: str = ""
 
     def resolved_deepl_key(self) -> str:
