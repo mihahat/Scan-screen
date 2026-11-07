@@ -2,11 +2,30 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QImage, QKeySequence, QPainter, QPen, QPixmap, QScreen
 from PyQt6.QtWidgets import QWidget
+
+def exclude_from_capture(widget: QWidget) -> bool:
+    """Hide a window from screenshots and screen recordings (Windows 10 2004+).
+
+    Live mode can then watch the screen underneath the translation, and screen
+    recorders or screen sharing never pick up the translated overlay. Returns
+    False where the OS doesn't support it.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        WDA_EXCLUDEFROMCAPTURE = 0x11
+        return bool(ctypes.windll.user32.SetWindowDisplayAffinity(int(widget.winId()), WDA_EXCLUDEFROMCAPTURE))
+    except Exception:  # noqa: BLE001
+        return False
+
 
 _OVERLAY_FLAGS = (
     Qt.WindowType.FramelessWindowHint
@@ -199,6 +218,12 @@ class ReplaceOverlay(QWidget):
 
     def translated_text(self) -> str:
         return "\n\n".join(p.text for p in self.placed)
+
+    def covered_rects(self) -> list[QRectF]:
+        """Everything this overlay paints on (logical px, relative to the overlay)."""
+        rects = [item.image_rect for item in self.placed]
+        rects += [QRectF(item.ink_rect.adjusted(-2, -2, 2, 2)) for item in self.placed if item.overflows]
+        return rects
 
     def show_over_screen(self) -> None:
         self.show()

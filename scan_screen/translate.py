@@ -132,9 +132,39 @@ class DeepLTranslator(Translator):
         return [t["text"] for t in resp.json()["translations"]]
 
 
+ONLINE_ENGINES = {"google", "deepl"}
+
+
 def get_translator(cfg: Config) -> Translator:
+    if cfg.engine == "local":
+        from .translate_local import LocalTranslator
+
+        return LocalTranslator(cfg.ocr_languages)
     if cfg.engine == "google":
         return GoogleFreeTranslator()
     if cfg.engine == "deepl":
         return DeepLTranslator(cfg.resolved_deepl_key())
-    raise TranslationError(f"Unknown engine {cfg.engine!r}; use 'google' or 'deepl'.")
+    raise TranslationError(f"Unknown engine {cfg.engine!r}; use 'local', 'google' or 'deepl'.")
+
+
+class CachingTranslator(Translator):
+    """Remembers translations for this session (in memory only).
+
+    Live mode re-reads the screen often; the cache means unchanged text is
+    never translated, or sent to an online engine, twice.
+    """
+
+    def __init__(self, inner: Translator, max_items: int = 5000):
+        self.inner = inner
+        self.name = inner.name
+        self.max_items = max_items
+        self.cache: dict[tuple[str, str, str], str] = {}
+
+    def translate_batch(self, texts: list[str], target: str, source: str = "auto") -> list[str]:
+        missing = list(dict.fromkeys(t for t in texts if (source, target, t) not in self.cache))
+        if missing:
+            for text, out in zip(missing, self.inner.translate_batch(missing, target, source)):
+                self.cache[(source, target, text)] = out
+            while len(self.cache) > self.max_items:
+                self.cache.pop(next(iter(self.cache)))
+        return [self.cache[(source, target, t)] for t in texts]

@@ -1,0 +1,129 @@
+name: Build
+
+# Builds Windows, macOS and Linux versions on every push to main (download them
+# from the run's "Artifacts"), and attaches them to a GitHub Release when you
+# push a tag like v0.2.0.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Tesseract languages bundled into the Windows build (same list as the tray menu).
+  OCR_LANGS: eng spa fra deu ita por nld pol rus ukr tur ara hin jpn kor chi_sim
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: ScanScreen-windows-x64
+          - os: macos-latest
+            name: ScanScreen-macos-arm64
+          - os: ubuntu-22.04
+            name: ScanScreen-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[build]"
+      - run: python packaging/make_icon.py
+
+      - name: Bundle Tesseract (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install tesseract -y --no-progress
+          $src = "C:\Program Files\Tesseract-OCR"
+          if (-not (Test-Path "$src\tesseract.exe")) { throw "Tesseract not found in $src" }
+          New-Item -ItemType Directory -Force build | Out-Null
+          Copy-Item $src build\tesseract -Recurse
+          foreach ($lang in $env:OCR_LANGS.Split(" ")) {
+            $dest = "build\tesseract\tessdata\$lang.traineddata"
+            if (-not (Test-Path $dest)) {
+              Invoke-WebRequest "https://github.com/tesseract-ocr/tessdata_fast/raw/main/$lang.traineddata" -OutFile $dest
+            }
+          }
+          "TESSERACT_DIR=$((Resolve-Path build\tesseract).Path)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Tesseract for the self-test (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tesseract
+
+      - name: Tesseract for the self-test (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
+      - name: Build
+        run: pyinstaller --noconfirm packaging/scan-screen.spec
+
+      - name: Self-test the packaged app
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Windows) exe=dist/ScanScreen/ScanScreen.exe ;;
+            macOS)   exe=dist/ScanScreen.app/Contents/MacOS/ScanScreen ;;
+            *)       exe=dist/ScanScreen/ScanScreen ;;
+          esac
+          "$exe" --selftest selftest.json || true
+          cat selftest.json
+          python -c "import json,sys; r=json.load(open('selftest.json')); sys.exit(0 if r['ok'] else 1)"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist\ScanScreen -DestinationPath "${{ matrix.name }}.zip"
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/ScanScreen.app "${{ matrix.name }}.zip"
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -C dist -czf "${{ matrix.name }}.tar.gz" ScanScreen
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

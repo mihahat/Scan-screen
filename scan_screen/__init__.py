@@ -1,3 +1,3 @@
 """Scan-screen: select part of your screen and see it translated in place."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

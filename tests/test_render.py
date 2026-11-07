@@ -40,8 +40,10 @@ def test_gradient_background_is_inpainted():
     (patch,) = make_patches(img, [block], ["Welcome"])
     cleaned = np.asarray(patch.image).astype(int)
     original = grad[patch.y:patch.y + cleaned.shape[0], patch.x:patch.x + cleaned.shape[1]].astype(int)
-    # Close to the underlying gradient, not a flat median colour.
-    assert np.abs(cleaned - original).mean() < 12
+    # Matches the underlying gradient everywhere, including where letters were:
+    # no outline of the old text may remain.
+    assert np.abs(cleaned - original).mean() < 2
+    assert np.abs(cleaned - original).max() < 12
 
 
 def test_skips_untranslated_and_noise():

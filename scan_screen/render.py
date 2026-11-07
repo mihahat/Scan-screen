@@ -5,7 +5,8 @@ For each paragraph we
   2. mark pixels inside the text lines that differ from it (the glyphs),
   3. take the original text colour from the most "inky" of those pixels,
   4. remove the glyphs: flat backgrounds (most UI) are filled with their exact
-     colour, anything else (gradients, photos) is inpainted from its surroundings.
+     colour, anything else (gradients, photos) is filled in smoothly from the
+     surrounding pixels.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -86,19 +86,59 @@ def make_patch(screenshot: np.ndarray, block: TextBlock, translation: str) -> Pa
         text_color = (20, 20, 20) if lum > 128 else (240, 240, 240)
 
     # 4. Remove the glyphs. Dilate so anti-aliased fringes go too.
-    mask = cv2.dilate(ink.astype(np.uint8) * 255, np.ones((3, 3), np.uint8), iterations=2)
-    mask[~in_lines] = 0
+    mask = _dilate(ink, 2) & in_lines
     if flat:
         # Exact colour, no blending: anything else leaves faint outlines of the old words.
         crop[in_lines] = bg.astype(np.uint8)
     elif mask.any():
-        crop = cv2.inpaint(crop, mask, 3, cv2.INPAINT_TELEA)
+        crop = inpaint(crop, mask)
 
     return Patch(
         x=x0, y=y0, image=Image.fromarray(crop),
         block=block, translation=translation,
         text_color=text_color, bg_color=tuple(int(c) for c in bg),
     )
+
+
+def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
+    """Grow a boolean mask by ``radius`` pixels (square neighbourhood)."""
+    h, w = mask.shape
+    padded = np.pad(mask, radius)
+    out = np.zeros_like(mask)
+    for dy in range(2 * radius + 1):
+        for dx in range(2 * radius + 1):
+            out |= padded[dy:dy + h, dx:dx + w]
+    return out
+
+
+def inpaint(img: np.ndarray, mask: np.ndarray, iterations: int = 60) -> np.ndarray:
+    """Fill masked pixels from their surroundings.
+
+    Letter strokes are thin, so each masked pixel is first set by blending,
+    along its row, the nearest known pixels on either side. That is already
+    exact for horizontal gradients. A few rounds of neighbour averaging then
+    smooth out vertical changes, with known pixels held fixed.
+    """
+    out = img.astype(np.float32)
+    h, w = mask.shape
+    cols = np.arange(w)
+    for y in np.flatnonzero(mask.any(axis=1)):
+        known = ~mask[y]
+        if not known.any():
+            continue
+        for c in range(out.shape[2]):
+            out[y, mask[y], c] = np.interp(cols[mask[y]], cols[known], out[y, known, c])
+    # Rows that were masked end to end: borrow from the nearest row above/below.
+    full_rows = np.flatnonzero(mask.all(axis=1))
+    good_rows = np.flatnonzero(~mask.all(axis=1))
+    if len(full_rows) and len(good_rows):
+        for y in full_rows:
+            out[y] = out[good_rows[np.abs(good_rows - y).argmin()]]
+    for _ in range(iterations):
+        p = np.pad(out, ((1, 1), (1, 1), (0, 0)), mode="edge")
+        avg = (p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]) * 0.25
+        out[mask] = avg[mask]
+    return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
 
 def make_patches(image: Image.Image, blocks: list[TextBlock], translations: list[str]) -> list[Patch]:
