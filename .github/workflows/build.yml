@@ -76,9 +76,10 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install tesseract
 
-      - name: Tesseract for the self-test (Linux)
+      - name: Tesseract and Qt's system libraries for the self-test (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+        # Desktop Linux has these already; the bare build machine doesn't.
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3
 
       - name: Build
         run: pyinstaller --noconfirm packaging/scan-screen.spec
