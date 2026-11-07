@@ -27,6 +27,7 @@ LANGUAGES = [
     ("Russian", "rus", "ru"), ("Ukrainian", "ukr", "uk"), ("Turkish", "tur", "tr"), ("Arabic", "ara", "ar"),
     ("Hindi", "hin", "hi"), ("Japanese", "jpn", "ja"), ("Korean", "kor", "ko"), ("Chinese (Simplified)", "chi_sim", "zh"),
 ]
+ENGINE_SHORT = {"local": "Offline (private)", "google": "Google Translate (online)", "deepl": "DeepL (online)"}
 ENGINE_LABELS = {"local": "Offline — private, nothing leaves this computer",
                  "google": "Google Translate — online, sends text",
                  "deepl": "DeepL — online, sends text"}
@@ -110,6 +111,9 @@ class _HotkeyBridge(QObject):
 
 
 class ScanScreen(QObject):
+    changed = pyqtSignal()   # state or settings changed: refresh the UI
+    status = pyqtSignal(str)  # short status line for the window
+
     def __init__(self, app: QApplication, cfg: Config, once: str | None = None):
         super().__init__()
         self.app = app
@@ -123,6 +127,7 @@ class ScanScreen(QObject):
         self.busy = False
         self.tray: QSystemTrayIcon | None = None
         self.hotkey_listener = None
+        self.window = None  # ControlWindow, created in start()
         self._jobs: list[QRunnable] = []
         self._translator: Translator | None = None
         self._translator_lock = threading.Lock()
@@ -157,7 +162,7 @@ class ScanScreen(QObject):
         with self._translator_lock:
             self._translator = None  # rebuild with the new settings (and an empty cache)
         self.apply_privacy()
-        self._update_tray()
+        self._refresh_ui()
         if self.live:
             self._live_restart()
 
@@ -169,16 +174,34 @@ class ScanScreen(QObject):
             return
         self._setup_tray()
         self._setup_hotkeys()
-        if self.tray is None and self.hotkey_listener is None:
-            print("No system tray and no global hotkey available. Bind your OS shortcut to "
-                  "`scan-screen --once` instead (see README).", file=sys.stderr)
-            self.app.quit()
+        from .window import ControlWindow
+
+        self.window = ControlWindow(self, _make_icon(), LANGUAGES, ENGINE_SHORT)
+        self.window.show()
+        hk = self.cfg.hotkey if self.hotkey_listener else None
+        self.status.emit(f"Ready. Press {hk} anywhere, or the button above." if hk else
+                         "Ready. (Global hotkeys aren't available on this system; use the buttons.)")
+
+    def quit(self) -> None:
+        if self.live:
+            self.stop_live()
+        self._close_overlay()
+        self._clear_toast()
+        if self.tray is not None:
+            self.tray.hide()
+        self.app.quit()
+
+    def show_window(self) -> None:
+        if self.window is not None:
+            self.window.bring_back()
 
     def _setup_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray = QSystemTrayIcon(_make_icon(), self.app)
         menu = QMenu()
+        menu.addAction("Open Scan-screen window", self.show_window)
+        menu.addSeparator()
         self._act_screen = menu.addAction("", self.translate_screen)
         menu.addAction(f"Translate region  ({self.cfg.region_hotkey})", self.translate_region)
         menu.addAction("Translate last region again", self.translate_last)
@@ -186,7 +209,7 @@ class ScanScreen(QObject):
 
         self._act_live = menu.addAction("Keep updating as the screen changes")
         self._act_live.setCheckable(True)
-        self._act_live.toggled.connect(self._set_live_mode)
+        self._act_live.toggled.connect(self.set_live_mode)
 
         src_menu = menu.addMenu("Screen language")
         dst_menu = menu.addMenu("Translate into")
@@ -201,8 +224,8 @@ class ScanScreen(QObject):
             b.setCheckable(True)
             b.setData(iso)
             self._dst_group.addAction(b)
-        self._src_group.triggered.connect(lambda a: self._set_source(a.data()))
-        self._dst_group.triggered.connect(lambda a: self._set_target(a.data()))
+        self._src_group.triggered.connect(lambda a: self.set_source(a.data()))
+        self._dst_group.triggered.connect(lambda a: self.set_target(a.data()))
 
         engine_menu = menu.addMenu("Translation engine")
         self._engine_group = QActionGroup(engine_menu)
@@ -211,19 +234,21 @@ class ScanScreen(QObject):
             a.setCheckable(True)
             a.setData(key)
             self._engine_group.addAction(a)
-        self._engine_group.triggered.connect(lambda a: self._set_engine(a.data()))
+        self._engine_group.triggered.connect(lambda a: self.set_engine(a.data()))
 
         menu.addSeparator()
         menu.addAction("Open config file", self.open_config)
-        menu.addAction("Quit", self.app.quit)
+        menu.addAction("Quit Scan-screen", self.quit)
         tray.setContextMenu(menu)
-        tray.activated.connect(lambda reason: reason == QSystemTrayIcon.ActivationReason.Trigger and self.translate_screen())
+        # Clicking the tray icon opens the window (right-click for the menu).
+        tray.activated.connect(lambda reason: reason == QSystemTrayIcon.ActivationReason.Trigger and self.show_window())
         self._menu = menu  # keep a reference
         self.tray = tray
-        self._update_tray()
+        self._refresh_ui()
         tray.show()
 
-    def _update_tray(self) -> None:
+    def _refresh_ui(self) -> None:
+        self.changed.emit()
         if self.tray is None:
             return
         label = "Stop translating" if self.live else "Translate screen"
@@ -239,34 +264,34 @@ class ScanScreen(QObject):
         mode = "offline (private)" if self.cfg.engine == "local" else f"ONLINE: text is sent to {self.cfg.engine}"
         self.tray.setToolTip(f"Scan-screen — {self.cfg.hotkey} to translate — {mode}")
 
-    def _set_live_mode(self, on: bool) -> None:
+    def set_live_mode(self, on: bool) -> None:
         self.cfg.live_mode = on
         if not on and self.live:
             self.stop_live()
         self._settings_changed()
 
-    def _set_source(self, tess: str) -> None:
+    def set_source(self, tess: str) -> None:
         self.cfg.ocr_languages = tess
         self.cfg.source_language = "auto"
         self._settings_changed()
 
-    def _set_target(self, iso: str) -> None:
+    def set_target(self, iso: str) -> None:
         self.cfg.target_language = iso
         self._settings_changed()
 
-    def _set_engine(self, engine: str) -> None:
+    def set_engine(self, engine: str) -> None:
         if engine in ONLINE_ENGINES and self.cfg.engine not in ONLINE_ENGINES:
             answer = QMessageBox.question(
-                None, "Use an online translator?",
+                self.window, "Use an online translator?",
                 f"With {engine.capitalize()}, the text recognised on your screen is sent to "
                 f"{engine.capitalize()}'s servers to be translated. Screenshots are never sent.\n\n"
                 "Offline mode keeps everything on this computer. Switch to the online engine anyway?")
             if answer != QMessageBox.StandardButton.Yes:
-                self._update_tray()
+                self._refresh_ui()
                 return
         if engine == "deepl" and not self.cfg.resolved_deepl_key():
             self._notify("Add your DeepL API key to the config file first (deepl_api_key).")
-            self._update_tray()
+            self._refresh_ui()
             return
         self.cfg.engine = engine
         self._settings_changed()
@@ -304,11 +329,13 @@ class ScanScreen(QObject):
         self.overlay.dismissed.disconnect()
         self.overlay.close()
         self.overlay = None
+        self._refresh_ui()
         return True
 
     def _toast(self, screen_geo: QRect, text: str, auto_close_ms: int = 0) -> None:
         self._clear_toast()
         self.toast = StatusToast(screen_geo, text, auto_close_ms)
+        self.status.emit(text)
 
     def _clear_toast(self) -> None:
         # Toasts that time out delete themselves; only close one that still exists.
@@ -324,13 +351,22 @@ class ScanScreen(QObject):
         if self.busy:
             return
         if self._close_overlay():
+            self.status.emit("Ready")
             return  # toggle off a one-shot translation
+        delay = 350 if self._tuck_window() else 120
         if self.cfg.live_mode and not self.once:
             self.start_live()
             return
         self.busy = True
         # Give the compositor a moment to remove our own windows before capturing.
-        QTimer.singleShot(120, self._capture_screen)
+        QTimer.singleShot(delay, self._capture_screen)
+
+    def _tuck_window(self) -> bool:
+        """Minimise the control window so it isn't captured and translated. True if it moved."""
+        if self.window is not None and self.window.isVisible() and not self.window.isMinimized():
+            self.window.showMinimized()
+            return True
+        return False
 
     def _capture_screen(self) -> None:
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
@@ -346,7 +382,7 @@ class ScanScreen(QObject):
             self.stop_live()
         self.busy = True
         self._close_overlay()
-        QTimer.singleShot(120, self._open_selector)
+        QTimer.singleShot(350 if self._tuck_window() else 120, self._open_selector)
 
     def _open_selector(self) -> None:
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
@@ -431,6 +467,9 @@ class ScanScreen(QObject):
         overlay.dismissed.connect(self._on_dismissed)
         self.overlay = overlay
         overlay.show_over_screen()
+        self._refresh_ui()
+        self.status.emit(f"Showing {len(patches)} translation{'s' if len(patches) != 1 else ''}. "
+                         "Click it or press Esc to close.")
 
     def _on_failed(self, screen_geo: QRect, err: Exception, retry=None) -> None:
         from .translate_local import ModelMissing
@@ -452,6 +491,8 @@ class ScanScreen(QObject):
 
     def _on_dismissed(self) -> None:
         self.overlay = None
+        self._refresh_ui()
+        self.status.emit("Ready")
         if self.once:
             self.app.quit()
 
@@ -459,7 +500,7 @@ class ScanScreen(QObject):
 
     def _offer_download(self, err, screen_geo: QRect, retry) -> None:
         answer = QMessageBox.question(
-            None, "Download offline translation model?",
+            self.window, "Download offline translation model?",
             f"To translate {err.src} → {err.dst} offline, Scan-screen needs a translation model "
             "(about 100–300 MB, once per language pair, from the Argos Translate project).\n\n"
             "Only the model file is downloaded. Nothing from your screen is sent. Download now?")
@@ -492,7 +533,7 @@ class ScanScreen(QObject):
         self.live = True
         self.ref_thumb = self.prev_thumb = None
         self.stable_ticks = 0
-        self._update_tray()
+        self._refresh_ui()
         self._toast(geo, "Live translation on — press the hotkey again to stop", auto_close_ms=1200)
         # First translation right away (after the toast is gone), then watch for changes.
         self.live_state = "settling"
@@ -505,7 +546,8 @@ class ScanScreen(QObject):
         self.live_timer.stop()
         self._close_overlay()
         self._clear_toast()
-        self._update_tray()
+        self._refresh_ui()
+        self.status.emit("Stopped. Ready to translate again.")
 
     def _live_restart(self) -> None:
         if self.overlay is not None:
@@ -531,6 +573,7 @@ class ScanScreen(QObject):
             if live.changed(thumb, self.ref_thumb, mask):
                 # The screen moved under the translation: hide it until things settle.
                 self.overlay.hide()
+                self.status.emit("Live: the screen changed, translating again when it settles…")
                 self.live_state = "settling"
                 self.prev_thumb = None
                 self.stable_ticks = 0
@@ -563,6 +606,9 @@ class ScanScreen(QObject):
             if patches:
                 self.overlay.show_over_screen()
             self.live_state = "showing"
+            n = len(patches)
+            self.status.emit(f"Live: {n} translation{'s' if n != 1 else ''} on screen, watching for changes."
+                             if n else "Live: nothing to translate right now, watching for changes.")
 
         def failed(err):
             self.stop_live()

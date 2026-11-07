@@ -18,13 +18,15 @@ The first time you translate a language pair offline, the app offers to download
 
 ## Use
 
-Scan-screen runs in the system tray (the menu bar on macOS).
+When you start Scan-screen, its window opens:
 
-- **Ctrl+Alt+T** translates the **whole screen** your mouse is on and keeps it up to date while you scroll, type or watch. Press it again to stop. In live mode your clicks go through to your apps as normal.
-- **Ctrl+Alt+R** translates just a **region**: drag a box around the text. Click or Esc to close it.
-- **Ctrl+C** while a region translation is showing copies the translated text.
+- **Translate screen** (or **Ctrl+Alt+T** from anywhere) translates the whole screen your mouse is on and keeps it up to date while you scroll, type or watch. The window minimises itself so it isn't translated too. Press the hotkey again, or **Stop translating** in the window, to stop. In live mode your clicks go through to your apps as normal.
+- **Translate a region** (or **Ctrl+Alt+R**): drag a box around the text. Click or Esc to close it; Ctrl+C copies the translation.
+- Choose the language **on screen**, the language to **translate into**, and the **translator**. The badge at the top shows whether you're **Offline · private** or **Online**.
+- **Hide window** keeps Scan-screen running in the background with the hotkeys working. Click its tray icon to bring the window back. On Windows the icon may be hidden behind the **^** arrow next to the clock.
+- **Quit Scan-screen**, or the window's close button, exits the app completely.
 
-The **tray menu** lets you choose the **screen language**, the language to **translate into**, the **translation engine**, and whether to **keep updating** as the screen changes. Text already in your target language is left as it is.
+Text already in your target language is left as it is. The tray icon's right-click menu has the same options.
 
 ### How live updating works
 
