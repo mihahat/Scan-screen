@@ -151,6 +151,8 @@ class _Placed:
     ink_rect: QRect      # area the drawn text actually covers
     overflows: bool      # text needed more room than the original had
     offset: float = 0.0  # moved down by this much since layout (scrolling); kept exact, not rounded
+    patch: object = None  # the render.Patch it was made from (original text position, translation)
+    dpr: float = 1.0
 
 
 class ReplaceOverlay(QWidget):
@@ -197,6 +199,20 @@ class ReplaceOverlay(QWidget):
             self.placed = keep
             self.update()
         return [self.item_rect(i) for i in gone]
+
+    @staticmethod
+    def phys_rect(item: _Placed) -> tuple[int, int, int, int]:
+        """Where the original text under this translation is now, in physical pixels (x, y, w, h)."""
+        p = item.patch
+        return p.x, p.y + round(item.offset * item.dpr), p.image.width, p.image.height
+
+    def replace_item(self, old: _Placed, patch, dpr: float) -> tuple[QRectF, QRectF]:
+        """Redraw one translation from a new patch (e.g. in a link's hover colours)."""
+        new = self._layout(patch, dpr)
+        before = self.item_rect(old)
+        self.placed = [new if i is old else i for i in self.placed]
+        self.update()
+        return before, self.item_rect(new)
 
     def take_all(self) -> list[_Placed]:
         """Remove every translation but hand them back (see restore)."""
@@ -264,8 +280,11 @@ class ReplaceOverlay(QWidget):
         start_px = max(self.MIN_FONT_PX, round(b.line_height / dpr * em_per_box_height(b.text)))
         font, text_rect, overflows = self._fit(patch.translation, box, start_px, max(1, len(b.lines)))
         ink = QFontMetrics(font).boundingRect(text_rect, int(Qt.TextFlag.TextWordWrap | align), patch.translation)
-        return _Placed(image, image_rect, text_rect, font, patch.translation,
+        item = _Placed(image, image_rect, text_rect, font, patch.translation,
                        QColor(*patch.text_color), QColor(*patch.bg_color), align, ink, overflows)
+        item.patch = patch
+        item.dpr = dpr
+        return item
 
     def _base_font(self) -> QFont:
         return QFont(self.font_family) if self.font_family else QFont()

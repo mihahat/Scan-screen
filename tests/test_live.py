@@ -139,3 +139,27 @@ def test_content_changes_are_not_mistaken_for_scrolling(rows):
     other[a:b, 400:1600] = screen(1777)[a:b, 400:1600]
     assert live.detect_scroll(prev, blank, (300, 48, 1700, 1080)) is None
     assert live.detect_scroll(prev, other, (300, 48, 1700, 1080)) is None
+
+
+def _text_region(text, fg, bg, underline=False):
+    from PIL import Image, ImageDraw, ImageFont
+    font = ImageFont.load_default(size=18)
+    im = Image.new("L", (260, 34), bg)
+    d = ImageDraw.Draw(im)
+    d.text((6, 6), text, fill=fg, font=font)
+    if underline:
+        d.line((6, 28, 6 + d.textlength(text, font=font), 28), fill=fg, width=1)
+    return np.asarray(im)
+
+
+@pytest.mark.parametrize("current, verdict", [
+    (("Nuevos mensajes", 200, 40), "same"),
+    (("Nuevos mensajes", 255, 40, True), "restyled"),   # hovering a link
+    (("Nuevos mensajes", 230, 70), "restyled"),         # row highlighted
+    (("Mensajes viejos", 200, 40), "changed"),
+    (("", 200, 40), "changed"),
+])
+def test_fingerprint_tells_hover_from_new_text(current, verdict):
+    fp = _text_region("Nuevos mensajes", 200, 40)
+    assert live.compare_region(fp, _text_region(*current)) == verdict
+    assert live.compare_region(None, fp) == "changed"

@@ -36,6 +36,8 @@ class Patch:
     translation: str
     text_color: tuple[int, int, int]
     bg_color: tuple[int, int, int]
+    # Grayscale pixels of the original text area, to recognise it later (live mode).
+    fp: object = None
 
 
 def _normalize(text: str) -> str:

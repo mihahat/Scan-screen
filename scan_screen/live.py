@@ -292,3 +292,57 @@ def _profile_candidates(pa: np.ndarray, pb: np.ndarray, h: int, min_rows: int, n
     for _, dy in errs[:n]:
         out.update((dy - 1, dy, dy + 1))
     return out
+
+
+# -- remembering what was translated -------------------------------------------------
+#
+# Every translation keeps a fingerprint: the grayscale pixels of the original text
+# it covers. When that spot changes, comparing with the fingerprint tells apart
+#   "same"     - nothing really changed under it (the change was next to it),
+#   "restyled" - the same letters in another colour, underlined or highlighted
+#                (hovering a link): just redraw the translation in the new colours,
+#   "changed"  - different text: read it again.
+
+
+def rgb(shot: QPixmap) -> np.ndarray:
+    """Full-resolution RGB copy of a screenshot."""
+    img = shot.toImage().convertToFormat(QImage.Format.Format_RGB888)
+    ptr = img.constBits()
+    ptr.setsize(img.sizeInBytes())
+    arr = np.frombuffer(bytes(ptr), np.uint8).reshape(img.height(), img.bytesPerLine())
+    return arr[:, : img.width() * 3].reshape(img.height(), img.width(), 3).copy()
+
+
+def edge_map(g: np.ndarray) -> np.ndarray:
+    """Where the outlines of letters are, whatever their colours."""
+    g = g.astype(np.int16)
+    gx = np.abs(np.diff(g, axis=1, prepend=g[:, :1]))
+    gy = np.abs(np.diff(g, axis=0, prepend=g[:1]))
+    m = np.maximum(gx, gy)
+    return m > max(20, int(m.max()) * 0.3)
+
+
+def _grow(mask: np.ndarray, r: int = 1) -> np.ndarray:
+    h, w = mask.shape
+    p = np.pad(mask, r)
+    out = np.zeros_like(mask)
+    for dy in range(2 * r + 1):
+        for dx in range(2 * r + 1):
+            out |= p[dy:dy + h, dx:dx + w]
+    return out
+
+
+def compare_region(fingerprint: np.ndarray | None, current: np.ndarray) -> str:
+    """'same', 'restyled' or 'changed' (see above)."""
+    if fingerprint is None or current.shape != fingerprint.shape or fingerprint.size == 0:
+        return "changed"
+    if float(np.abs(current.astype(np.int16) - fingerprint).mean()) < 4.0:
+        return "same"
+    a, b = edge_map(fingerprint), edge_map(current)
+    if a.sum() < 10:
+        return "changed"
+    # Allow a pixel of slack; extra outlines (an underline, a highlight's edge) are fine,
+    # missing ones (letters that aren't there any more) are not.
+    recall = (a & _grow(b)).sum() / a.sum()
+    precision = (b & _grow(a)).sum() / max(1, b.sum())
+    return "restyled" if recall >= 0.85 and precision >= 0.55 else "changed"
