@@ -67,9 +67,19 @@ jobs:
           foreach ($lang in $env:OCR_LANGS.Split(" ")) {
             $dest = "build\tesseract\tessdata\$lang.traineddata"
             if (-not (Test-Path $dest)) {
-              # GitHub's file server occasionally times out: retry a few times before failing.
-              $url = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/$lang.traineddata"
-              Invoke-WebRequest $url -OutFile $dest -MaximumRetryCount 5 -RetryIntervalSec 10
+              # Try GitHub's direct file host first, then the jsDelivr CDN mirror of the same repo.
+              $urls = @(
+                "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/$lang.traineddata",
+                "https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_fast@main/$lang.traineddata"
+              )
+              $ok = $false
+              foreach ($url in $urls) {
+                try {
+                  Invoke-WebRequest $url -OutFile $dest -MaximumRetryCount 3 -RetryIntervalSec 5 -TimeoutSec 120
+                  if ((Get-Item $dest).Length -gt 100000) { $ok = $true; break }
+                } catch { Write-Host "Download from $url failed: $_" }
+              }
+              if (-not $ok) { throw "Could not download $lang.traineddata" }
             }
           }
           "TESSERACT_DIR=$((Resolve-Path build\tesseract).Path)" | Out-File -FilePath $env:GITHUB_ENV -Append
