@@ -185,7 +185,7 @@ class _Model:
         import ctranslate2
 
         self.src, self.dst = pkg.from_code, pkg.to_code
-        threads = max(1, min(4, (os.cpu_count() or 2) - 1))
+        threads = max(1, min(4, os.cpu_count() or 2))
         self.translator = ctranslate2.Translator(str(pkg.path / "model"), device="cpu",
                                                  compute_type="int8", inter_threads=1, intra_threads=threads)
         spm_path = pkg.path / "sentencepiece.model"
@@ -263,6 +263,13 @@ class LocalTranslator(Translator):
                 pkg = installed_packages(self.root)[(src, dst)]
                 self._cache[key] = _Model(pkg)
             return self._cache[key]
+
+    def preload(self, target: str, source: str = "auto") -> None:
+        """Load the model(s) for this language pair ahead of time."""
+        src = self.resolve_source(source, target)
+        path = route(src, target, set(installed_packages(self.root)))
+        for pair in path or []:
+            self._model(*pair)
 
     def translate_batch(self, texts: list[str], target: str, source: str = "auto") -> list[str]:
         if not texts:

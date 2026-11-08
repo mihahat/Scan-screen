@@ -16,7 +16,9 @@ from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import __version__, live, privacy
 from .config import Config, config_path, load_config, save_config
-from .ocr import extract_blocks
+from .langcheck import is_source_text, ocr_languages_for
+from .ocr import OcrError, extract_blocks, split_block
+from .translate_local import source_from_ocr
 from .overlay import RegionSelector, ReplaceOverlay, StatusToast, exclude_from_capture
 from .render import make_patches, needs_translation, shift_patch
 from .translate import ONLINE_ENGINES, CachingTranslator, Translator, TranslationError, get_translator
@@ -67,8 +69,16 @@ class TranslateJob(QRunnable):
 
     def _run(self) -> None:
         try:
-            blocks = extract_blocks(self.image, self.cfg.ocr_languages, self.cfg.min_confidence, self.cfg.resolved_tesseract_cmd())
-            blocks = [b for b in blocks if needs_translation(b.text)]
+            cfg = self.cfg
+            blocks = extract_blocks(self.image, ocr_languages_for(cfg.ocr_languages), cfg.min_confidence,
+                                    cfg.resolved_tesseract_cmd())
+            source = cfg.source_language if cfg.source_language != "auto" else \
+                source_from_ocr(cfg.ocr_languages, cfg.target_language)
+            # Only text that's actually in the source language: English buttons and names
+            # on a Russian page are left exactly as they are.
+            is_src = lambda t: is_source_text(t, source, cfg.target_language)  # noqa: E731
+            blocks = [part for b in blocks for part in split_block(b, is_src)]
+            blocks = [b for b in blocks if needs_translation(b.text) and is_src(b.text)]
             if not blocks:
                 self.signals.done.emit([])
                 return
@@ -79,11 +89,8 @@ class TranslateJob(QRunnable):
         except Exception as e:  # noqa: BLE001 - shown to the user instead of crashing the tray app
             if isinstance(e, RuntimeError) and "has been deleted" in str(e):
                 raise  # the app is quitting; handled in run()
-            name = type(e).__name__
-            if name == "TesseractNotFoundError":
-                e = TranslationError("Tesseract isn't installed or isn't on PATH (see README).")
-            elif name == "TesseractError" and "Failed loading language" in str(e):
-                e = TranslationError(f"Tesseract language pack missing for '{self.cfg.ocr_languages}'.")
+            if isinstance(e, OcrError):
+                e = TranslationError(str(e))
             else:
                 traceback.print_exc()
             self.signals.failed.emit(e)
@@ -568,11 +575,26 @@ class ScanScreen(QObject):
         self.capture_probe_in = -1
         self.ticks_since_peek = 0
         self._refresh_ui()
+        self._warm_up()
         self._toast(geo, "Live translation on — press the hotkey again to stop", auto_close_ms=1200)
         # First pass reads the whole screen (after the toast is gone); then only what changes.
         self.live_state = "starting"
         QTimer.singleShot(1300, lambda: self._live_capture(None))
         self.live_timer.start(self._idle_interval())
+
+    def _warm_up(self) -> None:
+        """Load the translation model in the background now, not when the first text arrives."""
+        translator, cfg = self.translator(), self.cfg
+
+        def load():
+            try:
+                inner = getattr(translator, "inner", translator)
+                if hasattr(inner, "preload"):
+                    inner.preload(cfg.target_language, cfg.source_language)
+            except Exception:  # noqa: BLE001 - a missing model is reported when it's needed
+                pass
+
+        threading.Thread(target=load, daemon=True).start()
 
     def _idle_interval(self) -> int:
         return max(150, self.cfg.live_interval_ms)
@@ -657,7 +679,10 @@ class ScanScreen(QObject):
         rows = live.band_rows(ready) if ready.size else None
         if rows is not None:
             t = live.tile_px(dpr)
-            self._live_capture((rows[0] * t, (rows[1] + 1) * t))
+            cols = live.band_cols(ready)
+            # Only the part of the screen that changed: a new chat message doesn't need
+            # the sidebars read again.
+            self._live_capture((rows[0] * t, (rows[1] + 1) * t), (cols[0] * t, (cols[1] + 1) * t))
             return
         self.ticks_since_peek += 1
         peek_every = max(2, round(self.cfg.live_peek_ms / self._idle_interval()))
@@ -759,36 +784,46 @@ class ScanScreen(QObject):
 
         QTimer.singleShot(90, look)
 
-    def _live_capture(self, band: tuple[float, float] | None) -> None:
-        """Re-read a horizontal band of the screen (logical y range), or all of it."""
+    def _live_capture(self, band: tuple[float, float] | None, cols: tuple[float, float] | None = None) -> None:
+        """Re-read part of the screen (logical y range, optional x range), or all of it."""
         if not self.live:
             return
         geo = self.live_screen.geometry()
         y0, y1 = band if band else (0.0, float(geo.height()))
-        # Translations reaching into the band are re-read too, so paragraphs aren't cut in half.
-        for item in self.overlay.placed:
-            r = self.overlay.item_rect(item)
-            if r.bottom() >= y0 and r.top() <= y1:
-                y0, y1 = min(y0, r.top()), max(y1, r.bottom())
+        x0, x1 = cols if cols else (0.0, float(geo.width()))
+        # Translations reaching into the area are re-read too, so paragraphs aren't cut in half.
+        for _ in range(2):
+            for item in self.overlay.placed:
+                r = self.overlay.item_rect(item)
+                if r.bottom() >= y0 and r.top() <= y1 and r.right() >= x0 and r.left() <= x1:
+                    y0, y1 = min(y0, r.top()), max(y1, r.bottom())
+                    x0, x1 = min(x0, r.left()), max(x1, r.right())
         y0, y1 = max(0.0, y0), min(float(geo.height()), y1)
+        x0, x1 = max(0.0, x0), min(float(geo.width()), x1)
         dpr = self.live_screen.devicePixelRatio()
         if self.tracker.shape:
             t = live.tile_px(dpr)
-            band_tiles = np.zeros(self.tracker.shape, dtype=bool)
-            band_tiles[int(y0 // t):int(y1 // t) + 1, :] = True
-            self.tracker.clear(band_tiles)
+            area_tiles = np.zeros(self.tracker.shape, dtype=bool)
+            area_tiles[int(y0 // t):int(y1 // t) + 1, int(x0 // t):int(x1 // t) + 1] = True
+            self.tracker.clear(area_tiles)
         self.live_state = "capturing"
+
+        def in_area(r: QRectF) -> bool:
+            return r.bottom() >= y0 and r.top() <= y1 and r.right() >= x0 and r.left() <= x1
+
         if self.overlay_in_capture is False:
             # Screenshots don't include our translations: read straight away and swap the
             # results in afterwards, so the old translations stay up the whole time.
-            self._live_read_band(y0, y1, swap=True)
+            self._live_read_band(y0, y1, swap=True, x0=x0, x1=x1, in_area=in_area)
             return
-        # Otherwise take our translations out of the band so the screenshot shows the real screen.
-        gone = self.overlay.remove_where(lambda r: r.bottom() >= y0 and r.top() <= y1)
+        # Otherwise take our translations out of the area so the screenshot shows the real screen.
+        gone = self.overlay.remove_where(in_area)
         self._ignore_drawn(gone, dpr)
-        QTimer.singleShot(120 if gone else 0, lambda: self._live_read_band(y0, y1, swap=False))
+        QTimer.singleShot(120 if gone else 0,
+                          lambda: self._live_read_band(y0, y1, swap=False, x0=x0, x1=x1, in_area=in_area))
 
-    def _live_read_band(self, y0: float, y1: float, swap: bool) -> None:
+    def _live_read_band(self, y0: float, y1: float, swap: bool, x0: float = 0.0, x1: float | None = None,
+                        in_area=None) -> None:
         if not self.live:
             return
         shot = self._grab_live()
@@ -798,7 +833,9 @@ class ScanScreen(QObject):
         dpr = shot.devicePixelRatio()
         top = int(y0 * dpr)
         bottom = min(shot.height(), int(y1 * dpr + 0.999))
-        crop = shot.copy(QRect(0, top, shot.width(), max(1, bottom - top)))
+        left = int(x0 * dpr)
+        right = shot.width() if x1 is None else min(shot.width(), int(x1 * dpr + 0.999))
+        crop = shot.copy(QRect(left, top, max(1, right - left), max(1, bottom - top)))
         crop.setDevicePixelRatio(dpr)
         # Remember what the real screen looks like in this band (our translations are out of it).
         thumb = live.thumbnail(shot)
@@ -815,7 +852,7 @@ class ScanScreen(QObject):
         def done(patches):
             if not self.live:
                 return
-            patches = [shift_patch(p, 0, top) for p in patches]
+            patches = [shift_patch(p, left, top) for p in patches]
             # Content that scrolled while we were reading: move the results the same way.
             scrolled = bool(self.scrolls_since_read)
             for x0, sy0, x1, sy1, dy in self.scrolls_since_read:
@@ -839,8 +876,8 @@ class ScanScreen(QObject):
                 patches = [p for p in patches if not stale(p)]
             if swap:
                 # Replace what was in the band (unless it has since scrolled) in one repaint.
-                in_band = (lambda r: False) if scrolled else (lambda r: r.bottom() >= y0 and r.top() <= y1)
-                removed, added = self.overlay.replace_where(in_band, patches, dpr)
+                area = in_area or (lambda r: r.bottom() >= y0 and r.top() <= y1)
+                removed, added = self.overlay.replace_where((lambda r: False) if scrolled else area, patches, dpr)
                 self._ignore_drawn(removed + added, dpr)
             else:
                 self._ignore_drawn(self.overlay.add_patches(patches, dpr), dpr)

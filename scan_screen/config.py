@@ -88,7 +88,7 @@ class Config:
         if bundled:
             return bundled
         if shutil.which("tesseract"):
-            return None  # pytesseract finds it on PATH
+            return None  # found on PATH
         candidates = []
         if sys.platform == "win32":
             candidates = [

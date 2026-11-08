@@ -26,7 +26,7 @@ When you start Scan-screen, its window opens:
 - **Hide window** keeps Scan-screen running in the background with the hotkeys working. Click its tray icon to bring the window back. On Windows the icon may be hidden behind the **^** arrow next to the clock.
 - **Quit Scan-screen**, or the window's close button, exits the app completely.
 
-Text already in your target language is left as it is. The tray icon's right-click menu has the same options.
+Only text in the language you chose is translated: English buttons, usernames and links on a Russian page are left exactly as they are. The tray icon's right-click menu has the same options.
 
 ### How live updating works
 

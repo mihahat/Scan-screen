@@ -38,7 +38,7 @@ def test_group_words_joins_hyphenation_and_cjk():
     ])
     assert group_words(data)[0].text == "translation"
     cjk = _data([("日本", 90, 1, 1, 1, 0, 0, 40, 20), ("語", 90, 1, 1, 1, 45, 0, 20, 20)])
-    assert group_words(cjk, joiner="")[0].text == "日本語"
+    assert group_words(cjk)[0].text == "日本語"
 
 
 class FakeResp:

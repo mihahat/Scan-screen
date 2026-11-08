@@ -138,6 +138,14 @@ def rects_to_tiles(rects, shape: tuple[int, int], dpr: float, pad: float = 0) ->
     return mask
 
 
+def band_cols(tiles: np.ndarray, extra: int = 2) -> tuple[int, int] | None:
+    """First and last tile column (inclusive) covering the given tiles, plus a margin."""
+    cols = np.flatnonzero(tiles.any(axis=0))
+    if not len(cols):
+        return None
+    return max(0, cols[0] - extra), min(tiles.shape[1] - 1, cols[-1] + extra)
+
+
 def band_rows(tiles: np.ndarray, extra: int = 1) -> tuple[int, int] | None:
     """First and last tile row (inclusive) covering the given tiles, plus a margin."""
     rows = np.flatnonzero(tiles.any(axis=1))
