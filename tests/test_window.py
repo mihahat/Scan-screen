@@ -56,3 +56,11 @@ def test_quit_button_and_close_quit_the_app(ctl):
     ctl.quits.clear()
     ctl.window.close()
     assert ctl.quits
+
+
+def test_show_in_screenshots_setting(ctl):
+    assert ctl.cfg.hide_from_screenshots is True
+    assert not ctl.window.chk_shots.isChecked()
+    ctl.set_show_in_screenshots(True)
+    assert ctl.cfg.hide_from_screenshots is False
+    assert ctl.window.chk_shots.isChecked()

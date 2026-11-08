@@ -39,7 +39,7 @@ About twice a second it takes a small, low-resolution look at the screen and com
 - Changes made by Scan-screen itself (drawing or removing a translation) are ignored, so it never refreshes because of its own overlay.
 - Changes that happen while a strip is being read are remembered and handled straight after.
 
-On Windows 10 (2004+) and 11 the translations are invisible to screenshots, so the app can see the real screen underneath them. Where screenshots do include them (macOS, Linux), the app detects this. It then lifts the translations for about a tenth of a second every 3 seconds (`live_peek_ms`) to check whether the text underneath changed.
+By default on Windows 10 (2004+) and 11, the translations are invisible to screenshots and screen sharing: **a screenshot you take shows the original text**. Tick **Show translations in screenshots and screen sharing** in the window if you want them included. Otherwise the translations are invisible to screenshots, so the app can see the real screen underneath them. Where screenshots do include them (macOS, Linux), the app detects this. It then lifts the translations for about a tenth of a second every 3 seconds (`live_peek_ms`) to check whether the text underneath changed.
 
 Areas that never stop changing, such as a playing video, aren't translated in live mode. Use **Translate a region** for a snapshot of those.
 
@@ -110,6 +110,7 @@ Most settings are in the tray menu. The rest are in the config file: run `scan-s
 | `deepl_api_key` | | Your DeepL key. The `DEEPL_API_KEY` environment variable also works |
 | `live_mode` | `true` | Keep the whole-screen translation updated as the screen changes |
 | `live_interval_ms` | `600` | How often live mode checks for changes |
+| `hide_from_screenshots` | `true` | Windows: keep live translations out of screenshots and screen sharing |
 | `live_peek_ms` | `3000` | Only where screenshots include the translations: how often to check underneath them |
 | `click_through` | `false` | For one-off translations: let clicks go through to the apps below |
 | `tesseract_cmd` | | Full path to `tesseract` if it isn't found automatically |

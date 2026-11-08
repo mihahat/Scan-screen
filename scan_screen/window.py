@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt
@@ -121,6 +122,14 @@ class ControlWindow(QWidget):
         grid.addWidget(self.cmb_engine, 2, 1)
         self.chk_live = QCheckBox("Keep updating as the screen changes")
         grid.addWidget(self.chk_live, 3, 0, 1, 2)
+        self.chk_shots = QCheckBox("Show translations in screenshots and screen sharing")
+        self.chk_shots.setToolTip(
+            "Off: screenshots you take show the original text, and live mode can check the text "
+            "underneath without any flicker.\nOn: screenshots show the translation, and live mode "
+            "briefly lifts it every few seconds to check underneath.")
+        grid.addWidget(self.chk_shots, 4, 0, 1, 2)
+        # Only Windows can keep a window out of screenshots; elsewhere they always include it.
+        self.chk_shots.setVisible(sys.platform == "win32")
         grid.setColumnStretch(1, 1)
         outer.addWidget(card)
 
@@ -128,6 +137,7 @@ class ControlWindow(QWidget):
         self.cmb_dst.activated.connect(lambda _: self._syncing or ctl.set_target(self.cmb_dst.currentData()))
         self.cmb_engine.activated.connect(lambda _: self._syncing or ctl.set_engine(self.cmb_engine.currentData()))
         self.chk_live.toggled.connect(lambda on: self._syncing or ctl.set_live_mode(on))
+        self.chk_shots.toggled.connect(lambda on: self._syncing or ctl.set_show_in_screenshots(on))
 
         self.privacy_note = QLabel()
         self.privacy_note.setObjectName("privacyNote")
@@ -173,6 +183,7 @@ class ControlWindow(QWidget):
             self._select(self.cmb_dst, cfg.target_language)
             self._select(self.cmb_engine, cfg.engine)
             self.chk_live.setChecked(cfg.live_mode)
+            self.chk_shots.setChecked(not cfg.hide_from_screenshots)
             offline = cfg.engine == "local"
             self.badge.setText("Offline · private" if offline else "Online")
             self.badge.setProperty("mode", "offline" if offline else "online")

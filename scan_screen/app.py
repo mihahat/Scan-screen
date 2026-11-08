@@ -276,6 +276,16 @@ class ScanScreen(QObject):
         self.cfg.source_language = "auto"
         self._settings_changed()
 
+    def set_show_in_screenshots(self, show: bool) -> None:
+        self.cfg.hide_from_screenshots = not show
+        save_config(self.cfg)
+        if self.live and self.overlay is not None:
+            exclude_from_capture(self.overlay, exclude=not show)
+            # Screenshots now do or don't include the translations: check again.
+            self.overlay_in_capture = None
+            self.capture_probe_in = 3
+        self._refresh_ui()
+
     def set_target(self, iso: str) -> None:
         self.cfg.target_language = iso
         self._settings_changed()
@@ -528,9 +538,10 @@ class ScanScreen(QObject):
         geo = self.live_screen.geometry()
         self.overlay = ReplaceOverlay(geo, click_through=True, font_family=self.cfg.font_family)
         self.overlay.dismissed.connect(self._on_dismissed)
-        # Hide the overlay from screenshots where Windows allows it. Nice to have, but
-        # nothing depends on it: the change tracker ignores our own drawing either way.
-        exclude_from_capture(self.overlay)
+        # Optionally hide the overlay from screenshots (Windows). Nothing depends on it:
+        # the change tracker ignores our own drawing and detects either case.
+        if self.cfg.hide_from_screenshots:
+            exclude_from_capture(self.overlay)
         self.tracker = live.ChangeTracker()
         self.live = True
         self.live_state = "watching"

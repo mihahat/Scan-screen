@@ -63,6 +63,10 @@ class Config:
     live_mode: bool = True
     # How often live mode checks the screen for changes, in milliseconds.
     live_interval_ms: int = 600
+    # Windows only: keep live translations out of screenshots and screen sharing.
+    # Live mode then sees the real text underneath without lifting them; but
+    # screenshots you take show the original text, not the translation.
+    hide_from_screenshots: bool = True
     # Only where screenshots include the translations (e.g. macOS, Linux): how often
     # to lift them for a moment to check whether the text underneath changed.
     live_peek_ms: int = 3000

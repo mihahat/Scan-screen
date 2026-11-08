@@ -9,20 +9,21 @@ from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QImage, QKeySequence, QPainter, QPen, QPixmap, QScreen
 from PyQt6.QtWidgets import QWidget
 
-def exclude_from_capture(widget: QWidget) -> bool:
-    """Hide a window from screenshots and screen recordings (Windows 10 2004+).
+def exclude_from_capture(widget: QWidget, exclude: bool = True) -> bool:
+    """Hide a window from (or show it in) screenshots and screen sharing (Windows 10 2004+).
 
-    Live mode can then watch the screen underneath the translation, and screen
-    recorders or screen sharing never pick up the translated overlay. Returns
-    False where the OS doesn't support it.
+    Hidden, live mode can watch the screen underneath the translations, but
+    screenshots you take show the original text. Returns False where the OS
+    doesn't support it.
     """
     if sys.platform != "win32":
         return False
     try:
         import ctypes
 
-        WDA_EXCLUDEFROMCAPTURE = 0x11
-        return bool(ctypes.windll.user32.SetWindowDisplayAffinity(int(widget.winId()), WDA_EXCLUDEFROMCAPTURE))
+        WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11
+        mode = WDA_EXCLUDEFROMCAPTURE if exclude else WDA_NONE
+        return bool(ctypes.windll.user32.SetWindowDisplayAffinity(int(widget.winId()), mode))
     except Exception:  # noqa: BLE001
         return False
 
