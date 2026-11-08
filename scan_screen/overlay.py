@@ -150,6 +150,7 @@ class _Placed:
     align: Qt.AlignmentFlag
     ink_rect: QRect      # area the drawn text actually covers
     overflows: bool      # text needed more room than the original had
+    offset: float = 0.0  # moved down by this much since layout (scrolling); kept exact, not rounded
 
 
 class ReplaceOverlay(QWidget):
@@ -213,7 +214,45 @@ class ReplaceOverlay(QWidget):
         r = QRectF(item.image_rect)
         if item.overflows:
             r = r.united(QRectF(item.ink_rect.adjusted(-2, -2, 2, 2)))
-        return r
+        return r.translated(0, item.offset)
+
+    def shift_where(self, predicate, dy: float) -> tuple[list[QRectF], list[QRectF], list[_Placed]]:
+        """Move matching translations down by dy logical px (negative = up).
+
+        Returns their areas before and after (so callers can ignore the redraw) and the items.
+        """
+        before, after, items = [], [], []
+        for item in self.placed:
+            r = self.item_rect(item)
+            if predicate(r):
+                before.append(r)
+                item.offset += dy
+                after.append(self.item_rect(item))
+                items.append(item)
+        if before:
+            self.update()
+        return before, after, items
+
+    def remove_items(self, items: list[_Placed]) -> list[QRectF]:
+        gone = [i for i in self.placed if any(i is x for x in items)]
+        if gone:
+            self.placed = [i for i in self.placed if not any(i is x for x in gone)]
+            self.update()
+        return [self.item_rect(i) for i in gone]
+
+    def replace_where(self, predicate, patches, dpr: float) -> tuple[list[QRectF], list[QRectF]]:
+        """Swap translations for new ones in a single repaint, so nothing flashes.
+
+        Removes translations for which predicate(area) is true, or that overlap a new one.
+        """
+        new = [self._layout(p, dpr) for p in patches]
+        new_rects = [self.item_rect(i) for i in new]
+        gone = [i for i in self.placed
+                if predicate(self.item_rect(i)) or any(self.item_rect(i).intersects(r) for r in new_rects)]
+        removed = [self.item_rect(i) for i in gone]
+        self.placed = [i for i in self.placed if not any(i is g for g in gone)] + new
+        self.update()
+        return removed, new_rects
 
     def _layout(self, patch, dpr: float) -> _Placed:
         b = patch.block
@@ -277,13 +316,13 @@ class ReplaceOverlay(QWidget):
             # A translation longer than the original spills past the cleaned patch;
             # give the spill a background (the patch is drawn over it right after).
             if item.overflows:
-                p.fillRect(item.ink_rect.adjusted(-2, -2, 2, 2), item.fill)
+                p.fillRect(QRectF(item.ink_rect.adjusted(-2, -2, 2, 2)).translated(0, item.offset), item.fill)
         for item in self.placed:
-            p.drawImage(item.image_rect, item.image)
+            p.drawImage(item.image_rect.translated(0, item.offset), item.image)
         for item in self.placed:
             p.setPen(item.color)
             p.setFont(item.font)
-            p.drawText(item.text_rect, int(Qt.TextFlag.TextWordWrap | item.align), item.text)
+            p.drawText(QRectF(item.text_rect).translated(0, item.offset), int(Qt.TextFlag.TextWordWrap | item.align), item.text)
         if self.flash:
             f = self._base_font()
             f.setPixelSize(14)

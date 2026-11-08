@@ -98,3 +98,44 @@ def test_rects_to_tiles_and_band(app):
     mask = live.rects_to_tiles([QRectF(100, 100, 50, 20)], shape, dpr=1.0)
     assert mask[2, 2] and mask[2, 3] and mask.sum() == 2  # 48px tiles
     assert live.band_rows(mask, extra=1) == (1, 3)
+
+
+def _page_screen():
+    rng = np.random.default_rng(0)
+    page = np.full((3000, 1200), 245, np.uint8)
+    for y in range(0, 3000, 34):
+        for x in range(40, 1100, 70):
+            if rng.random() < 0.7:
+                page[y + 8:y + 22, x:x + rng.integers(20, 60)] = 30
+
+    def screen(offset):
+        s = np.full((1080, 1920), 250, np.uint8)
+        s[:80] = 40        # fixed header
+        s[80:, :300] = 200  # sidebar
+        s[1000:] = 90      # message box
+        s[80:1000, 400:1600] = page[offset:offset + 920]
+        return s
+    return screen
+
+
+@pytest.mark.parametrize("real", [1, 3, 9, 37, -120, 180, 400])
+def test_detect_scroll_is_pixel_exact_next_to_fixed_bars(real):
+    screen = _page_screen()
+    found = live.detect_scroll(screen(1000), screen(1000 + real), (300, 48, 1700, 1080))
+    assert found is not None
+    dy, top, bottom = found
+    assert dy == -real
+    assert top >= 80 and bottom <= 1000  # the header and message box are not part of the moving area
+
+
+@pytest.mark.parametrize("rows", [(200, 600), (100, 300), (500, 900), (80, 1000)])
+def test_content_changes_are_not_mistaken_for_scrolling(rows):
+    screen = _page_screen()
+    prev = screen(1000)
+    a, b = rows
+    blank = screen(1000)
+    blank[a:b, 400:1600] = 245
+    other = screen(1000)
+    other[a:b, 400:1600] = screen(1777)[a:b, 400:1600]
+    assert live.detect_scroll(prev, blank, (300, 48, 1700, 1080)) is None
+    assert live.detect_scroll(prev, other, (300, 48, 1700, 1080)) is None

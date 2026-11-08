@@ -59,6 +59,6 @@ if sys.platform == "darwin":
         info_plist={
             "LSUIElement": True,  # menu-bar app, no Dock icon
             "NSHighResolutionCapable": True,
-            "CFBundleShortVersionString": "0.3.2",
+            "CFBundleShortVersionString": "0.4.0",
         },
     )

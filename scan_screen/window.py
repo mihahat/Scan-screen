@@ -124,9 +124,9 @@ class ControlWindow(QWidget):
         grid.addWidget(self.chk_live, 3, 0, 1, 2)
         self.chk_shots = QCheckBox("Show translations in screenshots and screen sharing")
         self.chk_shots.setToolTip(
-            "Off: screenshots you take show the original text, and live mode can check the text "
-            "underneath without any flicker.\nOn: screenshots show the translation, and live mode "
-            "briefly lifts it every few seconds to check underneath.")
+            "Off (recommended): smoothest. Translations follow scrolling and update without flicker; "
+            "screenshots you take show the original text.\nOn: screenshots show the translation, but "
+            "translations are re-read after scrolling and briefly lift every few seconds to check underneath.")
         grid.addWidget(self.chk_shots, 4, 0, 1, 2)
         # Only Windows can keep a window out of screenshots; elsewhere they always include it.
         self.chk_shots.setVisible(sys.platform == "win32")

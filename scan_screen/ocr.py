@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import statistics
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from PIL import Image, ImageOps, ImageStat
+
+# Tesseract's own threads busy-wait; several Tesseract processes at once (we run
+# our OCR passes in parallel) then fight over the CPU and slow to a crawl. One
+# thread per process, many processes, is much faster.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
 # Scripts that are written without spaces between words.
 _NO_SPACE_LANGS = {"jpn", "jpn_vert", "chi_sim", "chi_tra", "chi_sim_vert", "chi_tra_vert", "tha", "lao", "khm", "mya"}
@@ -142,13 +149,18 @@ def extract_blocks(image: Image.Image, langs: str = "eng", min_conf: float = 40,
         return group_words(data, min_conf=min_conf, scale=scale, joiner=joiner)
 
     # The normal layout mode keeps paragraphs together, which translates best.
-    blocks = read(prepared, 3)
+    passes = [(prepared, 3)]
     if max(image.size) >= 400:
         # Larger captures (whole screens) mix layouts and light/dark areas, which
         # one pass misses. Fill the gaps with sparse-text mode (isolated labels)
         # and an inverted pass (text the other polarity), keeping only new finds.
-        for img, psm in [(prepared, 11), (ImageOps.invert(prepared), 3)]:
-            blocks += [b for b in read(img, psm) if not any(_overlaps(b, o) for o in blocks)]
+        passes += [(prepared, 11), (ImageOps.invert(prepared), 3)]
+    # Each pass is a separate Tesseract process, so they run in parallel on separate cores.
+    with ThreadPoolExecutor(max_workers=len(passes)) as pool:
+        results = list(pool.map(lambda job: read(*job), passes))
+    blocks = results[0]
+    for extra in results[1:]:
+        blocks += [b for b in extra if not any(_overlaps(b, o) for o in blocks)]
     blocks.sort(key=lambda b: (b.y, b.x))
     return blocks
 

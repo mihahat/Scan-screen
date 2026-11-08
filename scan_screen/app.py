@@ -28,6 +28,7 @@ LANGUAGES = [
     ("Russian", "rus", "ru"), ("Ukrainian", "ukr", "uk"), ("Turkish", "tur", "tr"), ("Arabic", "ara", "ar"),
     ("Hindi", "hin", "hi"), ("Japanese", "jpn", "ja"), ("Korean", "kor", "ko"), ("Chinese (Simplified)", "chi_sim", "zh"),
 ]
+FAST_TICK_MS = 120  # live mode looks this often while the screen is moving
 ENGINE_SHORT = {"local": "Offline (private)", "google": "Google Translate (online)", "deepl": "DeepL (online)"}
 ENGINE_LABELS = {"local": "Offline — private, nothing leaves this computer",
                  "google": "Google Translate — online, sends text",
@@ -58,6 +59,14 @@ class TranslateJob(QRunnable):
 
     def run(self) -> None:
         try:
+            self._run()
+        except RuntimeError as e:
+            # The app quit while we were working and the Qt objects are gone: nothing to report to.
+            if "has been deleted" not in str(e):
+                raise
+
+    def _run(self) -> None:
+        try:
             blocks = extract_blocks(self.image, self.cfg.ocr_languages, self.cfg.min_confidence, self.cfg.resolved_tesseract_cmd())
             blocks = [b for b in blocks if needs_translation(b.text)]
             if not blocks:
@@ -68,6 +77,8 @@ class TranslateJob(QRunnable):
         except TranslationError as e:
             self.signals.failed.emit(e)
         except Exception as e:  # noqa: BLE001 - shown to the user instead of crashing the tray app
+            if isinstance(e, RuntimeError) and "has been deleted" in str(e):
+                raise  # the app is quitting; handled in run()
             name = type(e).__name__
             if name == "TesseractNotFoundError":
                 e = TranslationError("Tesseract isn't installed or isn't on PATH (see README).")
@@ -544,13 +555,15 @@ class ScanScreen(QObject):
             exclude_from_capture(self.overlay)
         self.tracker = live.ChangeTracker()
         self.live = True
-        self.live_state = "watching"
         self.live_full_refresh = False
+        self.prev_gray = None              # last full-resolution frame, for scroll detection
+        self.scrolls_since_read: list = []  # scrolls that happened while a read was running
         # The real screen as last seen without our translations on top (thumbnail).
         self.base_thumb = None
         # Whether screenshots include our overlay: None = not known yet. If they do,
         # changes hidden underneath a translation can't be seen, so we briefly lift
-        # the translations every few seconds to look ("peek").
+        # the translations now and then to look ("peek"). If they don't, updates can
+        # swap translations in place without anything flashing.
         self.overlay_in_capture = None
         self.capture_probe_in = -1
         self.ticks_since_peek = 0
@@ -559,7 +572,16 @@ class ScanScreen(QObject):
         # First pass reads the whole screen (after the toast is gone); then only what changes.
         self.live_state = "starting"
         QTimer.singleShot(1300, lambda: self._live_capture(None))
-        self.live_timer.start(max(200, self.cfg.live_interval_ms))
+        self.live_timer.start(self._idle_interval())
+
+    def _idle_interval(self) -> int:
+        return max(150, self.cfg.live_interval_ms)
+
+    def _set_tick_speed(self, fast: bool) -> None:
+        """Look more often while the screen is moving, so translations keep up."""
+        want = min(FAST_TICK_MS, self._idle_interval()) if fast else self._idle_interval()
+        if self.live_timer.interval() != want:
+            self.live_timer.setInterval(want)
 
     def stop_live(self) -> None:
         self.live = False
@@ -579,9 +601,28 @@ class ScanScreen(QObject):
         return None if shot.isNull() or shot.width() == 0 else shot
 
     def _ignore_drawn(self, rects, dpr: float) -> None:
-        """Our overlay just changed in these areas: don't mistake that for the screen changing."""
+        """Our overlay just changed in these areas: don't mistake that for the screen changing.
+
+        Not needed (and harmful: it would hide real changes, like the next step of a
+        scroll) once we know screenshots don't include the overlay.
+        """
+        if self.overlay_in_capture is False:
+            return
         if rects and self.tracker.shape:
             self.tracker.ignore_tiles(live.rects_to_tiles(rects, self.tracker.shape, dpr, pad=4))
+
+    def _overlay_pixels(self, shape: tuple[int, int], dpr: float) -> np.ndarray | None:
+        """Mask (physical px) of where our translations are, if screenshots might include them."""
+        # Only once we know screenshots include them; until then frames are compared as they are.
+        if self.overlay_in_capture is not True or self.overlay is None or not self.overlay.placed:
+            return None
+        mask = np.zeros(shape, dtype=bool)
+        for item in self.overlay.placed:
+            r = self.overlay.item_rect(item)
+            y0, y1 = max(0, int(r.top() * dpr) - 2), min(shape[0], int(r.bottom() * dpr) + 3)
+            x0, x1 = max(0, int(r.left() * dpr) - 2), min(shape[1], int(r.right() * dpr) + 3)
+            mask[y0:y1, x0:x1] = True
+        return mask
 
     def _live_tick(self) -> None:
         if not self.live:
@@ -590,16 +631,22 @@ class ScanScreen(QObject):
         if shot is None:
             return
         dpr = shot.devicePixelRatio()
-        thumb = live.thumbnail(shot)
+        frame = live.gray(shot)
+        thumb = live.thumb_of(frame)
+        dirty_before = None if self.tracker.dirty is None else self.tracker.dirty.copy()
         changed = self.tracker.update(thumb)
         shape = self.tracker.shape
         self._probe_capture(thumb, dpr)
-        if changed is not None and changed.any() and self.overlay is not None:
-            # Only translations sitting on changed tiles are now out of date; the rest stay.
-            gone = self.overlay.remove_where(lambda r: (live.rects_to_tiles([r], shape, dpr) & changed).any())
-            self._ignore_drawn(gone, dpr)
-            if gone and self.live_state == "watching":
-                self.status.emit("Live: part of the screen changed, updating it…")
+        moving = changed is not None and bool(changed.any())
+        if moving and self.overlay is not None:
+            if not self._follow_scroll(frame, thumb, changed, dirty_before, dpr):
+                # Not a scroll: translations sitting on changed tiles are out of date; the rest stay.
+                gone = self.overlay.remove_where(lambda r: (live.rects_to_tiles([r], shape, dpr) & changed).any())
+                self._ignore_drawn(gone, dpr)
+                if gone and self.live_state == "watching":
+                    self.status.emit("Live: part of the screen changed, updating it…")
+        self.prev_gray = frame
+        self._set_tick_speed(moving or bool(self.tracker.dirty is not None and self.tracker.dirty.any()))
         if self.busy or self.live_state != "watching":
             return  # changes are still recorded above and handled after the current read
         if self.live_full_refresh:
@@ -613,9 +660,50 @@ class ScanScreen(QObject):
             self._live_capture((rows[0] * t, (rows[1] + 1) * t))
             return
         self.ticks_since_peek += 1
-        peek_every = max(2, round(self.cfg.live_peek_ms / max(200, self.cfg.live_interval_ms)))
+        peek_every = max(2, round(self.cfg.live_peek_ms / self._idle_interval()))
         if self.overlay_in_capture and self.overlay.placed and self.ticks_since_peek >= peek_every:
             self._peek()
+
+    def _follow_scroll(self, frame, thumb, changed, dirty_before, dpr: float) -> bool:
+        """If the change is content scrolling, move the translations with it. True if so."""
+        if self.prev_gray is None or dirty_before is None or changed.sum() < 4:
+            return False
+        box = live.tiles_box(changed, frame.shape)
+        if box is None:
+            return False
+        found = live.detect_scroll(self.prev_gray, frame, box, self._overlay_pixels(frame.shape, dpr))
+        if found is None:
+            return False
+        dy, y0, y1 = found  # only the rows that actually moved (not a fixed header next to them)
+        x0, x1 = box[0], box[2]
+        lx0, ly0, lx1, ly1 = x0 / dpr, y0 / dpr, x1 / dpr, y1 / dpr
+
+        def in_box(r: QRectF) -> bool:
+            return lx0 <= r.center().x() <= lx1 and r.top() >= ly0 - 2 and r.bottom() <= ly1 + 2
+
+        before, after, moved = self.overlay.shift_where(in_box, dy / dpr)
+        # Translations that scrolled out of the moving area are gone from view.
+        out = [i for i in moved if not in_box(self.overlay.item_rect(i))]
+        gone = self.overlay.remove_items(out)
+        self._ignore_drawn(before + after + gone, dpr)
+        # The moved area isn't new; only the strip that scrolled into view needs reading.
+        box_tiles = live.rects_to_tiles([QRectF(lx0, ly0, lx1 - lx0, ly1 - ly0)], self.tracker.shape, dpr)
+        if dy < 0:
+            strip = QRectF(lx0, (y1 + dy) / dpr, lx1 - lx0, -dy / dpr)
+        else:
+            strip = QRectF(lx0, ly0, lx1 - lx0, dy / dpr)
+        strip_tiles = live.rects_to_tiles([strip], self.tracker.shape, dpr, pad=2)
+        self.tracker.dirty = (dirty_before | (self.tracker.dirty & ~box_tiles)) | strip_tiles
+        # A read that's running now will come back with pre-scroll positions: remember to shift them.
+        self.scrolls_since_read.append((x0, y0, x1, y1, dy))
+        if self.base_thumb is not None and self.base_thumb.shape == thumb.shape:
+            d = live.THUMB_DIVISOR
+            r0, r1, c0, c1 = y0 // d, -(-y1 // d), x0 // d, -(-x1 // d)
+            area = self.base_thumb[r0:r1, c0:c1]
+            area[:] = np.roll(area, round(dy / d), axis=0)
+        if self.live_state == "watching":
+            self.status.emit("Live: following the scroll…")
+        return True
 
     def _probe_capture(self, thumb, dpr: float) -> None:
         """Once, shortly after translations first appear: do screenshots include them?"""
@@ -632,7 +720,10 @@ class ScanScreen(QObject):
         self.overlay_in_capture = bool(differs.sum() >= max(1, under.sum() // 3))
 
     def _peek(self) -> None:
-        """Lift the translations for a moment to see if the text underneath changed."""
+        """Lift the translations for a moment to see if the text underneath changed.
+
+        Only needed where screenshots include our translations.
+        """
         self.ticks_since_peek = 0
         self.live_state = "peeking"
         dpr = self.live_screen.devicePixelRatio()
@@ -666,7 +757,7 @@ class ScanScreen(QObject):
                 self.status.emit("Live: text under a translation changed, updating it…")
             self.live_state = "watching"
 
-        QTimer.singleShot(120, look)
+        QTimer.singleShot(90, look)
 
     def _live_capture(self, band: tuple[float, float] | None) -> None:
         """Re-read a horizontal band of the screen (logical y range), or all of it."""
@@ -680,20 +771,24 @@ class ScanScreen(QObject):
             if r.bottom() >= y0 and r.top() <= y1:
                 y0, y1 = min(y0, r.top()), max(y1, r.bottom())
         y0, y1 = max(0.0, y0), min(float(geo.height()), y1)
-        # Take our translations out of the band so the screenshot shows the real screen.
-        gone = self.overlay.remove_where(lambda r: r.bottom() >= y0 and r.top() <= y1)
         dpr = self.live_screen.devicePixelRatio()
-        self._ignore_drawn(gone, dpr)
         if self.tracker.shape:
             t = live.tile_px(dpr)
             band_tiles = np.zeros(self.tracker.shape, dtype=bool)
             band_tiles[int(y0 // t):int(y1 // t) + 1, :] = True
             self.tracker.clear(band_tiles)
         self.live_state = "capturing"
-        # Give the compositor a moment to repaint without the removed translations.
-        QTimer.singleShot(150 if gone else 0, lambda: self._live_read_band(y0, y1))
+        if self.overlay_in_capture is False:
+            # Screenshots don't include our translations: read straight away and swap the
+            # results in afterwards, so the old translations stay up the whole time.
+            self._live_read_band(y0, y1, swap=True)
+            return
+        # Otherwise take our translations out of the band so the screenshot shows the real screen.
+        gone = self.overlay.remove_where(lambda r: r.bottom() >= y0 and r.top() <= y1)
+        self._ignore_drawn(gone, dpr)
+        QTimer.singleShot(120 if gone else 0, lambda: self._live_read_band(y0, y1, swap=False))
 
-    def _live_read_band(self, y0: float, y1: float) -> None:
+    def _live_read_band(self, y0: float, y1: float, swap: bool) -> None:
         if not self.live:
             return
         shot = self._grab_live()
@@ -713,6 +808,7 @@ class ScanScreen(QObject):
             r0 = top // live.THUMB_DIVISOR
             r1 = -(-bottom // live.THUMB_DIVISOR)
             self.base_thumb[r0:r1] = thumb[r0:r1]
+        self.scrolls_since_read = []
         self.live_state = "translating"
         geo = self.live_screen.geometry()
 
@@ -720,6 +816,19 @@ class ScanScreen(QObject):
             if not self.live:
                 return
             patches = [shift_patch(p, 0, top) for p in patches]
+            # Content that scrolled while we were reading: move the results the same way.
+            scrolled = bool(self.scrolls_since_read)
+            for x0, sy0, x1, sy1, dy in self.scrolls_since_read:
+                moved = []
+                for p in patches:
+                    cx, py0, py1 = p.x + p.image.width / 2, p.y, p.y + p.image.height
+                    if x0 <= cx <= x1 and py0 >= sy0 - 2 and py1 <= sy1 + 2:
+                        p = shift_patch(p, 0, dy)
+                        if p.y < sy0 - 2 or p.y + p.image.height > sy1 + 2:
+                            continue  # scrolled out of view
+                    moved.append(p)
+                patches = moved
+            self.scrolls_since_read = []
             shape = self.tracker.shape
             if shape and self.tracker.dirty is not None:
                 # Skip results for spots that changed again while we were reading them;
@@ -728,7 +837,13 @@ class ScanScreen(QObject):
                     r = QRectF(p.x / dpr, p.y / dpr, p.image.width / dpr, p.image.height / dpr)
                     return (live.rects_to_tiles([r], shape, dpr) & self.tracker.dirty).any()
                 patches = [p for p in patches if not stale(p)]
-            self._ignore_drawn(self.overlay.add_patches(patches, dpr), dpr)
+            if swap:
+                # Replace what was in the band (unless it has since scrolled) in one repaint.
+                in_band = (lambda r: False) if scrolled else (lambda r: r.bottom() >= y0 and r.top() <= y1)
+                removed, added = self.overlay.replace_where(in_band, patches, dpr)
+                self._ignore_drawn(removed + added, dpr)
+            else:
+                self._ignore_drawn(self.overlay.add_patches(patches, dpr), dpr)
             if not self.overlay.isVisible():
                 self.overlay.show_over_screen()
             if self.overlay_in_capture is None and patches:

@@ -18,15 +18,12 @@ MIN_CHANGED = 12      # changed thumbnail pixels needed (a blinking caret is ~6)
 
 
 def thumbnail(shot: QPixmap) -> np.ndarray:
-    img = shot.toImage()
-    w = max(1, img.width() // THUMB_DIVISOR)
-    h = max(1, img.height() // THUMB_DIVISOR)
-    small = img.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
-    small = small.convertToFormat(QImage.Format.Format_Grayscale8)
-    ptr = small.constBits()
-    ptr.setsize(small.sizeInBytes())
-    arr = np.frombuffer(bytes(ptr), np.uint8).reshape(small.height(), small.bytesPerLine())
-    return arr[:, : small.width()].copy()
+    return thumb_of(gray(shot))
+
+
+def thumb_of(gray_frame: np.ndarray) -> np.ndarray:
+    """Small grayscale thumbnail (every THUMB_DIVISOR-th pixel) of a full-resolution frame."""
+    return np.ascontiguousarray(gray_frame[::THUMB_DIVISOR, ::THUMB_DIVISOR])
 
 
 def overlay_mask(shape: tuple[int, int], rects: list[QRectF], logical_width: float, pad: int = 2) -> np.ndarray:
@@ -147,3 +144,143 @@ def band_rows(tiles: np.ndarray, extra: int = 1) -> tuple[int, int] | None:
     if not len(rows):
         return None
     return max(0, rows[0] - extra), min(tiles.shape[0] - 1, rows[-1] + extra)
+
+
+# -- scroll detection ---------------------------------------------------------------
+#
+# When an area changes because its content moved up or down (scrolling), the
+# translations there can simply move along with it; only the strip of new text
+# that scrolled into view needs reading. Detection works on full-resolution
+# grayscale frames so the shift is exact to the pixel: errors would otherwise
+# add up over a long scroll.
+
+
+def gray(shot: QPixmap) -> np.ndarray:
+    """Full-resolution grayscale copy of a screenshot."""
+    img = shot.toImage().convertToFormat(QImage.Format.Format_Grayscale8)
+    ptr = img.constBits()
+    ptr.setsize(img.sizeInBytes())
+    arr = np.frombuffer(bytes(ptr), np.uint8).reshape(img.height(), img.bytesPerLine())
+    return arr[:, : img.width()].copy()
+
+
+def tiles_box(tiles: np.ndarray, img_shape: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """Physical-pixel box (x0, y0, x1, y1) around the given tiles."""
+    rows = np.flatnonzero(tiles.any(axis=1))
+    cols = np.flatnonzero(tiles.any(axis=0))
+    if not len(rows):
+        return None
+    t = TILE * THUMB_DIVISOR
+    return (int(cols[0] * t), int(rows[0] * t),
+            min(img_shape[1], int((cols[-1] + 1) * t)), min(img_shape[0], int((rows[-1] + 1) * t)))
+
+
+def detect_scroll(prev: np.ndarray, cur: np.ndarray, box: tuple[int, int, int, int],
+                  ignore: np.ndarray | None = None, min_rows: int = 40) -> tuple[int, int, int] | None:
+    """Find a vertical scroll inside ``box`` (physical px).
+
+    Returns (dy, top, bottom): the content moved by dy (negative = up) and the
+    rows top..bottom (in the current frame) are the part that moved. Rows that
+    stayed put, such as a fixed header next to the scrolling area, are left out.
+    Returns None when the change isn't a plain vertical scroll. ``ignore`` marks
+    pixels to leave out of the comparison (e.g. our own overlay).
+    """
+    if prev is None or prev.shape != cur.shape:
+        return None
+    x0, y0, x1, y1 = box
+    h = y1 - y0
+    if h < min_rows * 2 or x1 - x0 < 40:
+        return None
+    cols = slice(x0, x1, 2)  # every other column is plenty and twice as fast
+    # Trim to the rows that changed: static bars above or below the scrolling area
+    # (a header, a message box) would otherwise dominate the comparison.
+    diff_rows = np.abs(cur[y0:y1, cols].astype(np.int16) - prev[y0:y1, cols].astype(np.int16)).mean(axis=1)
+    moved = np.flatnonzero(diff_rows > 3.0)
+    if len(moved) < min_rows // 2:
+        return None
+    y0, y1 = y0 + int(moved[0]), y0 + int(moved[-1]) + 1
+    h = y1 - y0
+    if h < min_rows * 2:
+        return None
+    a = prev[y0:y1, cols].astype(np.float32)
+    b = cur[y0:y1, cols].astype(np.float32)
+    keep = None if ignore is None else ~ignore[y0:y1, cols]
+
+    def row_err(dy: int) -> np.ndarray:
+        """Mean difference per current-frame row if content moved by dy (NaN where unknown)."""
+        out = np.full(h, np.nan, dtype=np.float32)
+        if dy >= 0:
+            cb, ca, rows = b[dy:], a[:h - dy], slice(dy, h)
+            k = None if keep is None else keep[dy:] & keep[:h - dy]
+        else:
+            cb, ca, rows = b[:dy], a[-dy:], slice(0, h + dy)
+            k = None if keep is None else keep[:dy] & keep[-dy:]
+        d = np.abs(cb - ca)
+        if k is None:
+            out[rows] = d.mean(axis=1)
+        else:
+            cnt = k.sum(axis=1)
+            sums = np.where(k, d, 0).sum(axis=1)
+            vals = np.where(cnt >= k.shape[1] * 0.3, sums / np.maximum(cnt, 1), np.nan)
+            out[rows] = vals
+        return out
+
+    # 1) Coarse: compare per-row brightness profiles for every possible shift.
+    pa, pb = a.mean(axis=1), b.mean(axis=1)
+    pa -= pa.mean()
+    pb -= pb.mean()
+    coarse = _profile_candidates(pa, pb, h, min_rows)
+    if not coarse:
+        return None
+
+    # 2) Row by row: which rows changed at all, and how well does each shift explain them?
+    still = np.nan_to_num(row_err(0), nan=0.0)
+    changed_rows = still > 3.0
+    if changed_rows.sum() < min_rows // 2:
+        return None
+    textured = b.std(axis=1) > 8.0  # rows of the new frame with visible content on them
+    scored = []
+    # Small shifts are always checked: slow scrolling moves a few pixels at a time.
+    for dy in sorted({*range(-8, 9), *coarse}):
+        # A real scroll lines up across most of the moving area; a chance match lines up a sliver.
+        if dy == 0 or abs(dy) > h - max(min_rows, 0.4 * h):
+            continue
+        err = row_err(dy)
+        known = changed_rows & ~np.isnan(err)
+        if known.sum() < min_rows // 2:
+            continue
+        e = np.nan_to_num(err, nan=255.0)
+        # A row is explained when the shift removes most of its difference. Judging each row
+        # against its own change keeps small mismatches from hiding in a wide average.
+        explained = known & (e < np.maximum(1.0, 0.25 * still))
+        # Content that vanished (now blank) can line up with blank gaps by chance. A real
+        # scroll lines up rows that have something on them in the new frame.
+        if (explained & textured).sum() < max(min_rows // 4, 0.3 * explained.sum()):
+            continue
+        # Rank by the error over every overlapping row, not just the changed ones: flat
+        # shapes (buttons, highlight bars) match several shifts if only their edges count.
+        overlap = ~np.isnan(err)
+        total = float(np.nan_to_num(err, nan=0.0)[overlap].mean())
+        scored.append((round(total, 3), abs(dy), dy, explained.sum() / known.sum()))
+    if not scored:
+        return None
+    _, _, dy, fit = min(scored)
+    if fit < 0.85:
+        return None
+    rows = np.flatnonzero(changed_rows)
+    return dy, y0 + int(rows[0]), y0 + int(rows[-1]) + 1
+
+
+def _profile_candidates(pa: np.ndarray, pb: np.ndarray, h: int, min_rows: int, n: int = 3) -> set[int]:
+    """The few best shifts by row-profile match (plus neighbours), to check properly."""
+    errs = []
+    for dy in range(-(h - min_rows), h - min_rows + 1):
+        if dy == 0:
+            continue
+        e = np.abs(pb[dy:] - pa[:-dy]).mean() if dy > 0 else np.abs(pb[:dy] - pa[-dy:]).mean()
+        errs.append((e, dy))
+    errs.sort()
+    out: set[int] = set()
+    for _, dy in errs[:n]:
+        out.update((dy - 1, dy, dy + 1))
+    return out

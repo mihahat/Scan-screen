@@ -62,21 +62,21 @@ class Config:
     # Clicks then pass through to your apps; stop it with the hotkey or tray menu.
     live_mode: bool = True
     # How often live mode checks the screen for changes, in milliseconds.
-    live_interval_ms: int = 600
+    live_interval_ms: int = 300
     # Windows only: keep live translations out of screenshots and screen sharing.
     # Live mode then sees the real text underneath without lifting them; but
     # screenshots you take show the original text, not the translation.
     hide_from_screenshots: bool = True
     # Only where screenshots include the translations (e.g. macOS, Linux): how often
     # to lift them for a moment to check whether the text underneath changed.
-    live_peek_ms: int = 3000
+    live_peek_ms: int = 10000
     # One-shot / region mode: let clicks pass through to the apps underneath
     # (dismiss with the hotkey instead of a click).
     click_through: bool = False
     # Font for translations; empty uses the system UI font.
     font_family: str = ""
     # Format version of this file; used to migrate old settings safely.
-    config_version: int = 2
+    config_version: int = 3
 
     def resolved_deepl_key(self) -> str:
         return os.environ.get("DEEPL_API_KEY") or self.deepl_api_key
@@ -122,6 +122,14 @@ def load_config(path: Path | None = None) -> Config:
         if data.get("engine", "google") == "google":
             data["engine"] = "local"
         data["config_version"] = 2
+        migrated = True
+    if data.get("config_version", 1) < 3:
+        # Version 2 saved slower live-mode defaults; move unchanged ones to the new defaults.
+        if data.get("live_interval_ms") == 600:
+            data["live_interval_ms"] = 300
+        if data.get("live_peek_ms") == 3000:
+            data["live_peek_ms"] = 10000
+        data["config_version"] = 3
         migrated = True
     cfg = Config(**{k: v for k, v in data.items() if k in known})
     if migrated:

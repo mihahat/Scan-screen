@@ -32,14 +32,13 @@ Text already in your target language is left as it is. The tray icon's right-cli
 
 Scan-screen reads the **whole screen as pixels**, whatever program is showing; it doesn't attach to apps or windows.
 
-About twice a second it takes a small, low-resolution look at the screen and compares it with the previous look, in tiles of about 50×50 pixels:
+While the screen is still, it looks about three times a second; while things move, about eight times a second. Each look is compared with the previous one, in tiles of about 50×50 pixels:
 
-- Only translations on tiles that **changed** are removed. Everything else stays where it is, so a blinking cursor, a clock or an animation in one corner doesn't disturb the rest.
-- When those tiles stop changing, just that **strip of the screen** is read and translated again. Text already translated this session comes from memory.
-- Changes made by Scan-screen itself (drawing or removing a translation) are ignored, so it never refreshes because of its own overlay.
-- Changes that happen while a strip is being read are remembered and handled straight after.
+- **Scrolling:** when an area moved up or down, Scan-screen measures exactly how far, to the pixel, and **moves the translations with it**. Only the strip of new text that scrolled into view is read. Fixed bars next to the scrolling area (a header, a message box) are recognised and left alone.
+- **Other changes** (a new message, a menu opening): only translations on the tiles that changed are removed. Everything else stays where it is. When those tiles settle, just that strip of the screen is read again, and its translations are swapped in **in one step, without flashing**.
+- Text it has already translated this session comes from memory, and the three reading passes run in parallel, so updates usually take well under a second.
 
-By default on Windows 10 (2004+) and 11, the translations are invisible to screenshots and screen sharing: **a screenshot you take shows the original text**. Tick **Show translations in screenshots and screen sharing** in the window if you want them included. Otherwise the translations are invisible to screenshots, so the app can see the real screen underneath them. Where screenshots do include them (macOS, Linux), the app detects this. It then lifts the translations for about a tenth of a second every 3 seconds (`live_peek_ms`) to check whether the text underneath changed.
+**Show translations in screenshots and screen sharing** (Windows, off by default): leave it off for the smoothest result. Translations are then invisible to screenshots, so Scan-screen can see the real text underneath them while they're showing. Turn it on only if you need screenshots or screen sharing to include the translations. Translations then disappear while scrolling and are re-read afterwards, and every 10 seconds (`live_peek_ms`) they lift for a moment to check the text underneath. macOS and Linux always work this second way.
 
 Areas that never stop changing, such as a playing video, aren't translated in live mode. Use **Translate a region** for a snapshot of those.
 
@@ -109,9 +108,9 @@ Most settings are in the tray menu. The rest are in the config file: run `scan-s
 | `engine` | `local` | `local` (offline, private), `google` or `deepl` (online, sends text) |
 | `deepl_api_key` | | Your DeepL key. The `DEEPL_API_KEY` environment variable also works |
 | `live_mode` | `true` | Keep the whole-screen translation updated as the screen changes |
-| `live_interval_ms` | `600` | How often live mode checks for changes |
+| `live_interval_ms` | `300` | How often live mode checks for changes while the screen is still (faster while it moves) |
 | `hide_from_screenshots` | `true` | Windows: keep live translations out of screenshots and screen sharing |
-| `live_peek_ms` | `3000` | Only where screenshots include the translations: how often to check underneath them |
+| `live_peek_ms` | `10000` | Only where screenshots include the translations: how often to check underneath them |
 | `click_through` | `false` | For one-off translations: let clicks go through to the apps below |
 | `tesseract_cmd` | | Full path to `tesseract` if it isn't found automatically |
 | `min_confidence` | `40` | Drop words Tesseract is less sure of (0–100). Raise it if you see garbage |
