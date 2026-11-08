@@ -30,7 +30,18 @@ Text already in your target language is left as it is. The tray icon's right-cli
 
 ### How live updating works
 
-About twice a second the app takes a small, low-resolution look at the screen and compares it with the last one. When something changes (you scroll, a new message arrives), it hides the old translation so it never sits over the wrong text, waits for the screen to settle, and reads and translates it again. Text it has already translated is remembered for the session, so only new text is translated. A full re-read takes roughly 1–3 seconds depending on your screen size and computer. On Windows the translation is invisible to screenshots and screen sharing, so the app can watch the screen underneath it directly.
+Scan-screen reads the **whole screen as pixels**, whatever program is showing; it doesn't attach to apps or windows.
+
+About twice a second it takes a small, low-resolution look at the screen and compares it with the previous look, in tiles of about 50×50 pixels:
+
+- Only translations on tiles that **changed** are removed. Everything else stays where it is, so a blinking cursor, a clock or an animation in one corner doesn't disturb the rest.
+- When those tiles stop changing, just that **strip of the screen** is read and translated again. Text already translated this session comes from memory.
+- Changes made by Scan-screen itself (drawing or removing a translation) are ignored, so it never refreshes because of its own overlay.
+- Changes that happen while a strip is being read are remembered and handled straight after.
+
+On Windows 10 (2004+) and 11 the translations are invisible to screenshots, so the app can see the real screen underneath them. Where screenshots do include them (macOS, Linux), the app detects this. It then lifts the translations for about a tenth of a second every 3 seconds (`live_peek_ms`) to check whether the text underneath changed.
+
+Areas that never stop changing, such as a playing video, aren't translated in live mode. Use **Translate a region** for a snapshot of those.
 
 ## Privacy
 
@@ -99,6 +110,7 @@ Most settings are in the tray menu. The rest are in the config file: run `scan-s
 | `deepl_api_key` | | Your DeepL key. The `DEEPL_API_KEY` environment variable also works |
 | `live_mode` | `true` | Keep the whole-screen translation updated as the screen changes |
 | `live_interval_ms` | `600` | How often live mode checks for changes |
+| `live_peek_ms` | `3000` | Only where screenshots include the translations: how often to check underneath them |
 | `click_through` | `false` | For one-off translations: let clicks go through to the apps below |
 | `tesseract_cmd` | | Full path to `tesseract` if it isn't found automatically |
 | `min_confidence` | `40` | Drop words Tesseract is less sure of (0–100). Raise it if you see garbage |

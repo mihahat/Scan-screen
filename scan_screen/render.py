@@ -12,7 +12,7 @@ For each paragraph we
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from PIL import Image
@@ -148,3 +148,10 @@ def make_patches(image: Image.Image, blocks: list[TextBlock], translations: list
         for b, t in zip(blocks, translations)
         if t.strip() and not is_unchanged(b.text, t)
     ]
+
+
+def shift_patch(patch: Patch, dx: int, dy: int) -> Patch:
+    """Move a patch (and its text block) by dx, dy physical pixels."""
+    b = patch.block
+    block = replace(b, x=b.x + dx, y=b.y + dy, lines=[(x + dx, y + dy, w, h) for x, y, w, h in b.lines])
+    return replace(patch, x=patch.x + dx, y=patch.y + dy, block=block)

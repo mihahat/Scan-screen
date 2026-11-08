@@ -63,6 +63,9 @@ class Config:
     live_mode: bool = True
     # How often live mode checks the screen for changes, in milliseconds.
     live_interval_ms: int = 600
+    # Only where screenshots include the translations (e.g. macOS, Linux): how often
+    # to lift them for a moment to check whether the text underneath changed.
+    live_peek_ms: int = 3000
     # One-shot / region mode: let clicks pass through to the apps underneath
     # (dismiss with the hotkey instead of a click).
     click_through: bool = False

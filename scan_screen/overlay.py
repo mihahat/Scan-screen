@@ -179,6 +179,41 @@ class ReplaceOverlay(QWidget):
         self.placed = [self._layout(p, dpr) for p in patches]
         self.update()
 
+    def add_patches(self, patches, dpr: float) -> list[QRectF]:
+        """Add translations; returns the areas that now look different."""
+        new = [self._layout(p, dpr) for p in patches]
+        self.placed += new
+        self.update()
+        return [self.item_rect(i) for i in new]
+
+    def remove_where(self, predicate) -> list[QRectF]:
+        """Remove translations for which predicate(area) is true; returns their areas."""
+        keep, gone = [], []
+        for item in self.placed:
+            (gone if predicate(self.item_rect(item)) else keep).append(item)
+        if gone:
+            self.placed = keep
+            self.update()
+        return [self.item_rect(i) for i in gone]
+
+    def take_all(self) -> list[_Placed]:
+        """Remove every translation but hand them back (see restore)."""
+        items, self.placed = self.placed, []
+        self.update()
+        return items
+
+    def restore(self, items: list[_Placed]) -> list[QRectF]:
+        self.placed += items
+        self.update()
+        return [self.item_rect(i) for i in items]
+
+    @staticmethod
+    def item_rect(item: _Placed) -> QRectF:
+        r = QRectF(item.image_rect)
+        if item.overflows:
+            r = r.united(QRectF(item.ink_rect.adjusted(-2, -2, 2, 2)))
+        return r
+
     def _layout(self, patch, dpr: float) -> _Placed:
         b = patch.block
         image = pil_to_qimage(patch.image)
