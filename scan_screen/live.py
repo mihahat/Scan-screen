@@ -168,7 +168,7 @@ def gray(shot: QPixmap) -> np.ndarray:
     img = shot.toImage().convertToFormat(QImage.Format.Format_Grayscale8)
     ptr = img.constBits()
     ptr.setsize(img.sizeInBytes())
-    arr = np.frombuffer(bytes(ptr), np.uint8).reshape(img.height(), img.bytesPerLine())
+    arr = np.frombuffer(ptr, np.uint8).reshape(img.height(), img.bytesPerLine())  # no extra copy
     return arr[:, : img.width()].copy()
 
 

@@ -22,7 +22,7 @@ When you start Scan-screen, its window opens:
 
 - **Translate screen** (or **Ctrl+Alt+T** from anywhere) translates the whole screen your mouse is on and keeps it up to date while you scroll, type or watch. The window minimises itself so it isn't translated too. Press the hotkey again, or **Stop translating** in the window, to stop. In live mode your clicks go through to your apps as normal.
 - **Translate a region** (or **Ctrl+Alt+R**): drag a box around the text. Click or Esc to close it; Ctrl+C copies the translation.
-- Choose the language **on screen**, the language to **translate into**, and the **translator**. The badge at the top shows whether you're **Offline · private** or **Online**.
+- Choose the language **on screen** (or leave it on **Auto-detect**), the language to **translate into**, and the **translator**. Auto-detect works out the language once each time you start translating, never on every update, and shows what it found, e.g. *Auto-detect (Russian)*. It never picks English as the language to translate from. The badge at the top shows whether you're **Offline · private** or **Online**.
 - **Hide window** keeps Scan-screen running in the background with the hotkeys working. Click its tray icon to bring the window back. On Windows the icon may be hidden behind the **^** arrow next to the clock.
 - **Quit Scan-screen**, or the window's close button, exits the app completely.
 
@@ -32,7 +32,7 @@ Only text in the language you chose is translated: English buttons, usernames an
 
 Scan-screen reads the **whole screen as pixels**, whatever program is showing; it doesn't attach to apps or windows.
 
-While the screen is still, it looks about three times a second; while things move, 25 times a second, so translations keep up with scrolling. Each look is compared with the previous one, in tiles of about 50×50 pixels:
+While the screen is still, it looks ten times a second; while things move, 30 times a second. Between looks, translations in a scrolling area glide on at the measured speed (redrawn about 60 times a second), so they move with the page instead of jumping. Each look is compared with the previous one, in tiles of about 50×50 pixels:
 
 - **Scrolling:** when an area moved up or down, Scan-screen measures exactly how far, to the pixel, and **moves the translations with it**. Only the strip of new text that scrolled into view is read. Fixed bars next to the scrolling area (a header, a message box) are recognised and left alone.
 - **Other changes** (a new message, a menu opening): only translations on the tiles that changed are removed. Everything else stays where it is. When those tiles settle, just that strip of the screen is read again, and its translations are swapped in **in one step, without flashing**.
@@ -104,13 +104,13 @@ Most settings are in the tray menu. The rest are in the config file: run `scan-s
 |---|---|---|
 | `hotkey` | `<ctrl>+<alt>+t` | Translate the whole screen / stop ([pynput format](https://pynput.readthedocs.io/en/latest/keyboard.html#global-hotkeys)), e.g. `<cmd>+<shift>+t` |
 | `region_hotkey` | `<ctrl>+<alt>+r` | Pick a region to translate. `""` disables it |
-| `ocr_languages` | `eng` | Tesseract language(s) of the text on screen: `spa`, `jpn`, `chi_sim`, `eng+fra` … |
+| `ocr_languages` | `auto` | Tesseract language(s) of the text on screen: `spa`, `jpn`, `chi_sim`, `eng+fra` … |
 | `source_language` | `auto` | Language of the text. `auto` takes it from `ocr_languages` (offline) or detects it (online) |
 | `target_language` | `en` | Language to translate into: `en`, `de`, `es`, `ja` … |
 | `engine` | `local` | `local` (offline, private), `google` or `deepl` (online, sends text) |
 | `deepl_api_key` | | Your DeepL key. The `DEEPL_API_KEY` environment variable also works |
 | `live_mode` | `true` | Keep the whole-screen translation updated as the screen changes |
-| `live_interval_ms` | `300` | How often live mode checks for changes while the screen is still (faster while it moves) |
+| `live_interval_ms` | `100` | How often live mode checks for changes while the screen is still (faster while it moves) |
 | `hide_from_screenshots` | `true` | Windows: keep live translations out of screenshots and screen sharing |
 | `live_peek_ms` | `10000` | Only where screenshots include the translations: how often to check underneath them |
 | `click_through` | `false` | For one-off translations: let clicks go through to the apps below |

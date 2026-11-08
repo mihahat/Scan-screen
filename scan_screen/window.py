@@ -106,6 +106,7 @@ class ControlWindow(QWidget):
 
         self.cmb_src = QComboBox()
         self.cmb_dst = QComboBox()
+        self.cmb_src.addItem("Auto-detect", "auto")
         for name, tess, iso in languages:
             self.cmb_src.addItem(name, tess)
             self.cmb_dst.addItem(name, iso)
@@ -180,6 +181,11 @@ class ControlWindow(QWidget):
             self.btn_screen.setProperty("active", "true" if active else "false")
             self.btn_region.setText(f"Translate a region   ({_pretty_hotkey(cfg.region_hotkey)})")
             self._select(self.cmb_src, cfg.ocr_languages.split("+")[0])
+            if ctl.detected:
+                from .langdetect import language_name
+                self.cmb_src.setItemText(0, f"Auto-detect ({language_name(ctl.detected[0])})")
+            else:
+                self.cmb_src.setItemText(0, "Auto-detect")
             self._select(self.cmb_dst, cfg.target_language)
             self._select(self.cmb_engine, cfg.engine)
             self.chk_live.setChecked(cfg.live_mode)

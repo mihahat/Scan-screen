@@ -124,7 +124,7 @@ def test_old_config_migrates_to_offline(tmp_path):
     path.write_text(json.dumps({"engine": "google", "target_language": "de"}))
     cfg = load_config(path)
     assert cfg.engine == "local" and cfg.target_language == "de"
-    assert json.loads(path.read_text())["config_version"] == 3
+    assert json.loads(path.read_text())["config_version"] == 4
     # A deliberate online choice in a current config is respected.
     path.write_text(json.dumps({"engine": "deepl", "config_version": 2}))
     assert load_config(path).engine == "deepl"
@@ -143,6 +143,6 @@ def test_old_live_defaults_migrate_to_faster_ones(tmp_path):
     path.write_text(json.dumps({"engine": "local", "config_version": 2,
                                 "live_interval_ms": 600, "live_peek_ms": 3000}))
     cfg = load_config(path)
-    assert (cfg.live_interval_ms, cfg.live_peek_ms) == (300, 10000)
+    assert (cfg.live_interval_ms, cfg.live_peek_ms) == (100, 10000)
     path.write_text(json.dumps({"config_version": 2, "live_interval_ms": 900}))
     assert load_config(path).live_interval_ms == 900  # a deliberate choice is kept

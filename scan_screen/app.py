@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 import threading
+import time
 import traceback
 
 import numpy as np
@@ -30,7 +32,7 @@ LANGUAGES = [
     ("Russian", "rus", "ru"), ("Ukrainian", "ukr", "uk"), ("Turkish", "tur", "tr"), ("Arabic", "ara", "ar"),
     ("Hindi", "hin", "hi"), ("Japanese", "jpn", "ja"), ("Korean", "kor", "ko"), ("Chinese (Simplified)", "chi_sim", "zh"),
 ]
-FAST_TICK_MS = 40  # live mode looks this often while the screen is moving (25 times a second)
+FAST_TICK_MS = 33  # live mode looks this often while the screen is moving (30 times a second)
 MEMORY_ITEMS = 1500  # translations remembered after scrolling out of view
 MEMORY_RANGE_PX = 30000  # ...as long as they're within this distance
 ENGINE_SHORT = {"local": "Offline (private)", "google": "Google Translate (online)", "deepl": "DeepL (online)"}
@@ -100,6 +102,33 @@ class TranslateJob(QRunnable):
             self.image = None  # drop the screenshot as soon as we're done with it
 
 
+class _DetectSignals(QObject):
+    done = pyqtSignal(object)  # (tesseract pack, translation code) or None
+
+
+class DetectJob(QRunnable):
+    """Work out the screen's language once (Auto-detect), off the UI thread."""
+
+    def __init__(self, image: Image.Image, tesseract_cmd: str | None):
+        super().__init__()
+        self.image, self.cmd = image, tesseract_cmd
+        self.signals = _DetectSignals()
+
+    def run(self) -> None:
+        from .langdetect import detect_language
+
+        try:
+            result = detect_language(self.image, self.cmd)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            result = None
+        self.image = None
+        try:
+            self.signals.done.emit(result)
+        except RuntimeError:
+            pass  # the app quit meanwhile
+
+
 class _DownloadSignals(QObject):
     progress = pyqtSignal(int, int)
     done = pyqtSignal()
@@ -149,6 +178,7 @@ class ScanScreen(QObject):
         self.tray: QSystemTrayIcon | None = None
         self.hotkey_listener = None
         self.window = None  # ControlWindow, created in start()
+        self.detected: tuple[str, str] | None = None  # Auto-detect result for this run
         self._jobs: list[QRunnable] = []
         self._translator: Translator | None = None
         self._translator_lock = threading.Lock()
@@ -172,14 +202,59 @@ class ScanScreen(QObject):
         else:
             privacy.enforce_offline()
 
+    def effective_cfg(self) -> Config:
+        """The settings with Auto-detect replaced by the language that was detected."""
+        if self.cfg.ocr_languages == "auto" and self.detected:
+            return dataclasses.replace(self.cfg, ocr_languages=self.detected[0], source_language=self.detected[1])
+        return self.cfg
+
+    def needs_detection(self) -> bool:
+        return self.cfg.ocr_languages == "auto" and self.detected is None
+
     def translator(self) -> Translator:
         with self._translator_lock:
             if self._translator is None:
-                self._translator = CachingTranslator(get_translator(self.cfg))
+                self._translator = CachingTranslator(get_translator(self.effective_cfg()))
             return self._translator
+
+    def _ensure_language(self, shot: QPixmap, then, screen_geo: QRect | None = None) -> None:
+        """Run ``then`` once the screen's language is known (detecting it once if set to Auto)."""
+        if not self.needs_detection():
+            then()
+            return
+        geo = screen_geo or (QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()).geometry()
+        self._toast(geo, "Detecting the language…")
+        job = DetectJob(qimage_to_pil(shot.toImage()), self.cfg.resolved_tesseract_cmd())
+
+        def done(result):
+            self._finish_job(job)
+            self._clear_toast()
+            if not result:
+                msg = "Couldn't find text in another language to translate (only English?)"
+                self._toast(geo, msg, auto_close_ms=3000)
+                self.status.emit(msg + ". Choose the language in the window if it was wrong.")
+                if self.live:
+                    self.stop_live()
+                return
+            from .langdetect import language_name
+
+            self.detected = result
+            with self._translator_lock:
+                self._translator = None
+            self._refresh_ui()
+            self.status.emit(f"Detected {language_name(result[0])}.")
+            then()
+
+        job.signals.done.connect(done)
+        self._jobs.append(job)
+        job.setAutoDelete(False)
+        self.busy = True
+        self.pool.start(job)
 
     def _settings_changed(self) -> None:
         save_config(self.cfg)
+        if self.cfg.ocr_languages != "auto":
+            self.detected = None
         with self._translator_lock:
             self._translator = None  # rebuild with the new settings (and an empty cache)
         self.apply_privacy()
@@ -236,6 +311,11 @@ class ScanScreen(QObject):
         dst_menu = menu.addMenu("Translate into")
         self._src_group = QActionGroup(src_menu)
         self._dst_group = QActionGroup(dst_menu)
+        auto = src_menu.addAction("Auto-detect")
+        auto.setCheckable(True)
+        auto.setData("auto")
+        self._src_group.addAction(auto)
+        src_menu.addSeparator()
         for name, tess, iso in LANGUAGES:
             a = src_menu.addAction(name)
             a.setCheckable(True)
@@ -294,6 +374,7 @@ class ScanScreen(QObject):
     def set_source(self, tess: str) -> None:
         self.cfg.ocr_languages = tess
         self.cfg.source_language = "auto"
+        self.detected = None
         self._settings_changed()
 
     def set_show_in_screenshots(self, show: bool) -> None:
@@ -385,8 +466,13 @@ class ScanScreen(QObject):
             self.status.emit("Ready")
             return  # toggle off a one-shot translation
         delay = 350 if self._tuck_window() else 120
+        if self.cfg.ocr_languages == "auto":
+            self.detected = None  # detect once per start, never on every update
         if self.cfg.live_mode and not self.once:
-            self.start_live()
+            if self.needs_detection():
+                QTimer.singleShot(delay, self._detect_then_live)
+            else:
+                self.start_live()
             return
         self.busy = True
         # Give the compositor a moment to remove our own windows before capturing.
@@ -399,18 +485,26 @@ class ScanScreen(QObject):
             return True
         return False
 
+    def _detect_then_live(self) -> None:
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        shot = screen.grabWindow(0)
+        if self._check_shot(shot):
+            self._ensure_language(shot, self.start_live, screen.geometry())
+
     def _capture_screen(self) -> None:
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         shot = screen.grabWindow(0)
         if not self._check_shot(shot):
             return
-        self._run(screen.geometry(), shot, screen.geometry())
+        self._ensure_language(shot, lambda: self._run(screen.geometry(), shot, screen.geometry()), screen.geometry())
 
     def translate_region(self) -> None:
         if self.busy:
             return
         if self.live:
             self.stop_live()
+        if self.cfg.ocr_languages == "auto":
+            self.detected = None
         self.busy = True
         self._close_overlay()
         QTimer.singleShot(350 if self._tuck_window() else 120, self._open_selector)
@@ -466,10 +560,10 @@ class ScanScreen(QObject):
     def _on_selected(self, region: QRect, crop: QPixmap, screen_geo: QRect) -> None:
         self.selector = None
         self.last_region = region
-        self._run(region, crop, screen_geo)
+        self._ensure_language(crop, lambda: self._run(region, crop, screen_geo), screen_geo)
 
     def _start_job(self, shot: QPixmap, on_done, on_failed) -> None:
-        job = TranslateJob(qimage_to_pil(shot.toImage()), self.cfg, self.translator())
+        job = TranslateJob(qimage_to_pil(shot.toImage()), self.effective_cfg(), self.translator())
         job.signals.done.connect(lambda patches: (self._finish_job(job), on_done(patches)))
         job.signals.failed.connect(lambda err: (self._finish_job(job), on_failed(err)))
         # Keep a Python reference until the job reports back, so its signals stay alive.
@@ -590,7 +684,7 @@ class ScanScreen(QObject):
 
     def _warm_up(self) -> None:
         """Load the translation model in the background now, not when the first text arrives."""
-        translator, cfg = self.translator(), self.cfg
+        translator, cfg = self.translator(), self.effective_cfg()
 
         def load():
             try:
@@ -622,6 +716,12 @@ class ScanScreen(QObject):
 
     def _live_restart(self) -> None:
         """Settings changed: read the whole screen again with the new settings."""
+        if self.needs_detection():
+            shot = self._grab_live()
+            if shot is not None:
+                self._ensure_language(shot, lambda: setattr(self, "live_full_refresh", True),
+                                      self.live_screen.geometry())
+            return
         self.live_full_refresh = True
 
     def _grab_live(self) -> QPixmap | None:
@@ -655,11 +755,16 @@ class ScanScreen(QObject):
     def _live_tick(self) -> None:
         if not self.live:
             return
+        captured_at = time.monotonic()
         shot = self._grab_live()
         if shot is None:
             return
         dpr = shot.devicePixelRatio()
         frame = live.gray(shot)
+        # Time between the two screenshots being compared: what a measured scroll step took.
+        self._frame_dt = captured_at - getattr(self, "_captured_at", captured_at - FAST_TICK_MS / 1000)
+        self._captured_at = captured_at
+        self._scrolled_this_tick = False
         thumb = live.thumb_of(frame)
         dirty_before = None if self.tracker.dirty is None else self.tracker.dirty.copy()
         changed = self.tracker.update(thumb)
@@ -669,9 +774,14 @@ class ScanScreen(QObject):
         if moving and self.overlay is not None:
             if not self._follow_scroll(frame, thumb, changed, dirty_before, dpr, shot):
                 self._handle_change(frame, changed, dirty_before, dpr, shot)
+        if not self._scrolled_this_tick and self.overlay is not None:
+            self.overlay.stop_motion()  # scrolling stopped (or never started): no more gliding
         self.prev_gray = frame
-        self._set_tick_speed(moving or bool(self.tracker.dirty is not None and self.tracker.dirty.any()))
-        if self.busy or self.live_state != "watching":
+        # Keep looking quickly for a moment after scrolling, so the end of a scroll is noticed
+        # straight away and the translations stop gliding exactly where the text stopped.
+        recently = time.monotonic() - getattr(self, "_last_scroll_at", 0.0) < 0.5
+        self._set_tick_speed(moving or recently or bool(self.tracker.dirty is not None and self.tracker.dirty.any()))
+        if self.busy or self.live_state != "watching" or self.needs_detection():
             return  # changes are still recorded above and handled after the current read
         if self.live_full_refresh:
             self.live_full_refresh = False
@@ -746,6 +856,7 @@ class ScanScreen(QObject):
         dy, y0, y1 = found  # only the rows that actually moved (not a fixed header next to them)
         x0, x1 = box[0], box[2]
         self.last_scroll = (x0, x1, dy)
+        self._scrolled_this_tick = True
         lx0, ly0, lx1, ly1 = x0 / dpr, y0 / dpr, x1 / dpr, y1 / dpr
 
         def in_box(r: QRectF) -> bool:
@@ -753,6 +864,12 @@ class ScanScreen(QObject):
             return lx0 <= r.center().x() <= lx1 and ly0 <= r.center().y() <= ly1
 
         before, after, moved = self.overlay.shift_where(in_box, dy / dpr)
+        # Keep the translations gliding at the measured speed until the next check.
+        now = getattr(self, "_captured_at", time.monotonic())
+        since = min(max(getattr(self, "_frame_dt", FAST_TICK_MS / 1000), 0.015), 0.5)
+        self._last_scroll_at = now
+        if self.overlay_in_capture is False:
+            self.overlay.set_motion(lx0, lx1, ly0, ly1, (dy / dpr) / since, now, abs(dy / dpr))
         # Translations that scrolled out of the moving area: remember them for scrolling back.
         out = [i for i in moved if not in_box(self.overlay.item_rect(i))]
         gone = self.overlay.remove_items(out)

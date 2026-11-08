@@ -43,7 +43,8 @@ class Config:
     hotkey: str = "<ctrl>+<alt>+t"
     region_hotkey: str = "<ctrl>+<alt>+r"
     # Tesseract language packs to read, joined with "+", e.g. "eng", "jpn", "eng+fra".
-    ocr_languages: str = "eng"
+    # "auto" works it out once each time you start translating.
+    ocr_languages: str = "auto"
     # Language codes for translation (ISO 639-1, e.g. "en", "de", "ja").
     # "auto": offline mode takes it from ocr_languages; online engines detect it.
     source_language: str = "auto"
@@ -62,7 +63,7 @@ class Config:
     # Clicks then pass through to your apps; stop it with the hotkey or tray menu.
     live_mode: bool = True
     # How often live mode checks the screen for changes, in milliseconds.
-    live_interval_ms: int = 300
+    live_interval_ms: int = 100
     # Windows only: keep live translations out of screenshots and screen sharing.
     # Live mode then sees the real text underneath without lifting them; but
     # screenshots you take show the original text, not the translation.
@@ -76,7 +77,7 @@ class Config:
     # Font for translations; empty uses the system UI font.
     font_family: str = ""
     # Format version of this file; used to migrate old settings safely.
-    config_version: int = 3
+    config_version: int = 4
 
     def resolved_deepl_key(self) -> str:
         return os.environ.get("DEEPL_API_KEY") or self.deepl_api_key
@@ -130,6 +131,12 @@ def load_config(path: Path | None = None) -> Config:
         if data.get("live_peek_ms") == 3000:
             data["live_peek_ms"] = 10000
         data["config_version"] = 3
+        migrated = True
+    if data.get("config_version", 1) < 4:
+        # Version 3 checked the screen every 300 ms when idle; 100 ms notices scrolling sooner.
+        if data.get("live_interval_ms") in (300, 600):
+            data["live_interval_ms"] = 100
+        data["config_version"] = 4
         migrated = True
     cfg = Config(**{k: v for k, v in data.items() if k in known})
     if migrated:

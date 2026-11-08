@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import statistics
 import sys
+import time
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
@@ -28,6 +29,9 @@ def exclude_from_capture(widget: QWidget, exclude: bool = True) -> bool:
     except Exception:  # noqa: BLE001
         return False
 
+
+MOTION_DAMPING = 0.85   # predict a little less than the measured speed
+MOTION_TIMEOUT_S = 0.2  # stop predicting if no new measurement arrives within this time
 
 _OVERLAY_FLAGS = (
     Qt.WindowType.FramelessWindowHint
@@ -180,6 +184,13 @@ class ReplaceOverlay(QWidget):
         self.placed: list[_Placed] = []
         self.flash: str | None = None
         self._sizes: list[int] = []  # font sizes in use, so similar text gets identical sizes
+        # Areas that are scrolling right now: (x0, x1, y0, y1, speed px/s, measured at, max ahead).
+        # Between checks of the screen, translations there glide on at that speed (redrawn
+        # ~60 times a second) instead of jumping once per check.
+        self._motions: list[tuple] = []
+        self._anim = QTimer(self)
+        self._anim.setInterval(15)
+        self._anim.timeout.connect(self._animate)
 
     def set_patches(self, patches, dpr: float) -> None:
         self.placed = [self._layout(p, dpr) for p in patches]
@@ -233,6 +244,39 @@ class ReplaceOverlay(QWidget):
         if item.overflows:
             r = r.united(QRectF(item.ink_rect.adjusted(-2, -2, 2, 2)))
         return r.translated(0, item.offset)
+
+    def set_motion(self, x0: float, x1: float, y0: float, y1: float, speed: float, measured_at: float,
+                   max_ahead: float) -> None:
+        """Translations in this area are moving at ``speed`` logical px per second."""
+        self._motions = [m for m in self._motions if not (abs(m[0] - x0) < 60 and abs(m[1] - x1) < 60)]
+        self._motions.append((x0, x1, y0, y1, speed, measured_at, max_ahead))
+        if not self._anim.isActive():
+            self._anim.start()
+
+    def stop_motion(self) -> None:
+        if self._motions:
+            self._motions = []
+            self.update()
+
+    def _ahead(self, r: QRectF) -> float:
+        """How far ahead of its last measured position a translation should be drawn right now."""
+        if not self._motions:
+            return 0.0
+        cx, cy = r.center().x(), r.center().y()
+        now = time.monotonic()
+        for x0, x1, y0, y1, speed, t0, limit in self._motions:
+            if x0 <= cx <= x1 and y0 - limit <= cy <= y1 + limit:
+                # Damped a little, so it rarely runs ahead of the real text.
+                ahead = speed * (now - t0) * MOTION_DAMPING
+                return max(-limit, min(limit, ahead))
+        return 0.0
+
+    def _animate(self) -> None:
+        now = time.monotonic()
+        self._motions = [m for m in self._motions if now - m[5] < MOTION_TIMEOUT_S]
+        if not self._motions:
+            self._anim.stop()
+        self.update()
 
     def shift_where(self, predicate, dy: float) -> tuple[list[QRectF], list[QRectF], list[_Placed]]:
         """Move matching translations down by dy logical px (negative = up).
@@ -373,17 +417,20 @@ class ReplaceOverlay(QWidget):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for item in self.placed:
+        # Where each translation goes right now: its measured position, plus how far it
+        # has glided on since then if its area is scrolling.
+        shift = [item.offset + self._ahead(self.item_rect(item)) for item in self.placed]
+        for item, dy in zip(self.placed, shift):
             # A translation longer than the original spills past the cleaned patch;
             # give the spill a background (the patch is drawn over it right after).
             if item.overflows:
-                p.fillRect(QRectF(item.ink_rect.adjusted(-2, -2, 2, 2)).translated(0, item.offset), item.fill)
-        for item in self.placed:
-            p.drawImage(item.image_rect.translated(0, item.offset), item.image)
-        for item in self.placed:
+                p.fillRect(QRectF(item.ink_rect.adjusted(-2, -2, 2, 2)).translated(0, dy), item.fill)
+        for item, dy in zip(self.placed, shift):
+            p.drawImage(item.image_rect.translated(0, dy), item.image)
+        for item, dy in zip(self.placed, shift):
             p.setPen(item.color)
             p.setFont(item.font)
-            p.drawText(QRectF(item.text_rect).translated(0, item.offset), int(Qt.TextFlag.TextWordWrap | item.align), item.text)
+            p.drawText(QRectF(item.text_rect).translated(0, dy), int(Qt.TextFlag.TextWordWrap | item.align), item.text)
         if self.flash:
             f = self._base_font()
             f.setPixelSize(14)

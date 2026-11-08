@@ -174,6 +174,7 @@ def missing_download(src: str, dst: str, root: Path | None = None) -> bool:
 # -- translation -------------------------------------------------------------------
 
 
+_DOUBLE_STOP = re.compile(r"(?<!\.)\.\.(?!\.)")
 _TIME = re.compile(r"(\d): (\d\d)\b")
 _SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+")
 
@@ -233,7 +234,8 @@ class _Model:
         for (i, _), r in zip(pieces, results):
             out[i].append(self._decode(r.hypotheses[0]))
         sep = "" if self.dst in _NO_SPACE_TARGETS else " "
-        return [sep.join(parts) for parts in out]
+        # "a.m." at the end of a sentence comes back as "a.m.." - one full stop is enough.
+        return [_DOUBLE_STOP.sub(".", sep.join(parts)) for parts in out]
 
 
 class LocalTranslator(Translator):
