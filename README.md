@@ -32,7 +32,7 @@ Only text in the language you chose is translated: English buttons, usernames an
 
 Scan-screen reads the **whole screen as pixels**, whatever program is showing; it doesn't attach to apps or windows.
 
-While the screen is still, it looks about three times a second; while things move, about eight times a second. Each look is compared with the previous one, in tiles of about 50×50 pixels:
+While the screen is still, it looks about three times a second; while things move, 25 times a second, so translations keep up with scrolling. Each look is compared with the previous one, in tiles of about 50×50 pixels:
 
 - **Scrolling:** when an area moved up or down, Scan-screen measures exactly how far, to the pixel, and **moves the translations with it**. Only the strip of new text that scrolled into view is read. Fixed bars next to the scrolling area (a header, a message box) are recognised and left alone.
 - **Other changes** (a new message, a menu opening): only translations on the tiles that changed are removed. Everything else stays where it is. When those tiles settle, just that strip of the screen is read again, and its translations are swapped in **in one step, without flashing**.
@@ -131,7 +131,7 @@ Most settings are in the tray menu. The rest are in the config file: run `scan-s
 1. The screen is captured and read with Tesseract. A whole screen gets three passes (normal layout, sparse text for isolated labels, and inverted for light-on-dark areas), so menus, buttons and dark headers aren't missed.
 2. Paragraphs are translated in a batch. Anything that comes back unchanged is skipped.
 3. For each paragraph the background colour and the original text colour are measured. The old letters are erased: flat backgrounds are filled with their exact colour, and gradients or photos are filled in smoothly from the surrounding pixels.
-4. The translation is drawn in the original's colour at a matching size, shrinking to fit if it's longer.
+4. The translation is drawn in the original's colour at the same size, measured from how wide the original words were. Text that was the same size gets exactly the same size. A longer translation runs on or wraps rather than shrinking, and is never made smaller than 85% of the original.
 
 ## Development
 

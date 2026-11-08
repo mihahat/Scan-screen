@@ -30,7 +30,7 @@ LANGUAGES = [
     ("Russian", "rus", "ru"), ("Ukrainian", "ukr", "uk"), ("Turkish", "tur", "tr"), ("Arabic", "ara", "ar"),
     ("Hindi", "hin", "hi"), ("Japanese", "jpn", "ja"), ("Korean", "kor", "ko"), ("Chinese (Simplified)", "chi_sim", "zh"),
 ]
-FAST_TICK_MS = 120  # live mode looks this often while the screen is moving
+FAST_TICK_MS = 40  # live mode looks this often while the screen is moving (25 times a second)
 MEMORY_ITEMS = 1500  # translations remembered after scrolling out of view
 MEMORY_RANGE_PX = 30000  # ...as long as they're within this distance
 ENGINE_SHORT = {"local": "Offline (private)", "google": "Google Translate (online)", "deepl": "DeepL (online)"}
@@ -569,6 +569,7 @@ class ScanScreen(QObject):
         # Translations that scrolled out of view, kept (and kept moving with later scrolls)
         # so they come straight back when you scroll back to them.
         self.memory: list = []
+        self.last_scroll: tuple | None = None  # (x0, x1, dy) of the last scroll step seen
         self.scrolls_since_read: list = []  # scrolls that happened while a read was running
         # The real screen as last seen without our translations on top (thumbnail).
         self.base_thumb = None
@@ -736,11 +737,15 @@ class ScanScreen(QObject):
         box = live.tiles_box(changed, frame.shape)
         if box is None:
             return False
-        found = live.detect_scroll(self.prev_gray, frame, box, self._overlay_pixels(frame.shape, dpr))
+        hint = None
+        if self.last_scroll and abs(self.last_scroll[0] - box[0]) < 200 and abs(self.last_scroll[1] - box[2]) < 200:
+            hint = self.last_scroll[2]  # scrolling usually carries on at a similar speed
+        found = live.detect_scroll(self.prev_gray, frame, box, self._overlay_pixels(frame.shape, dpr), hint=hint)
         if found is None:
             return False
         dy, y0, y1 = found  # only the rows that actually moved (not a fixed header next to them)
         x0, x1 = box[0], box[2]
+        self.last_scroll = (x0, x1, dy)
         lx0, ly0, lx1, ly1 = x0 / dpr, y0 / dpr, x1 / dpr, y1 / dpr
 
         def in_box(r: QRectF) -> bool:

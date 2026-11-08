@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import statistics
 import sys
 from dataclasses import dataclass
 
@@ -178,6 +179,7 @@ class ReplaceOverlay(QWidget):
         self.font_family = font_family
         self.placed: list[_Placed] = []
         self.flash: str | None = None
+        self._sizes: list[int] = []  # font sizes in use, so similar text gets identical sizes
 
     def set_patches(self, patches, dpr: float) -> None:
         self.placed = [self._layout(p, dpr) for p in patches]
@@ -277,8 +279,8 @@ class ReplaceOverlay(QWidget):
         box = QRect(round(b.x / dpr), round(b.y / dpr), max(1, round(b.w / dpr)), max(1, round(b.h / dpr)))
         multi_line = len(b.lines) > 1
         align = Qt.AlignmentFlag.AlignLeft | (Qt.AlignmentFlag.AlignTop if multi_line else Qt.AlignmentFlag.AlignVCenter)
-        start_px = max(self.MIN_FONT_PX, round(b.line_height / dpr * em_per_box_height(b.text)))
-        font, text_rect, overflows = self._fit(patch.translation, box, start_px, max(1, len(b.lines)))
+        size = self._matched_size(b, dpr)
+        font, text_rect, overflows = self._fit(patch.translation, box, size, max(1, len(b.lines)))
         ink = QFontMetrics(font).boundingRect(text_rect, int(Qt.TextFlag.TextWordWrap | align), patch.translation)
         item = _Placed(image, image_rect, text_rect, font, patch.translation,
                        QColor(*patch.text_color), QColor(*patch.bg_color), align, ink, overflows)
@@ -289,26 +291,66 @@ class ReplaceOverlay(QWidget):
     def _base_font(self) -> QFont:
         return QFont(self.font_family) if self.font_family else QFont()
 
-    def _fit(self, text: str, box: QRect, start_px: int, n_lines: int = 1) -> tuple[QFont, QRect, bool]:
-        """Largest size that fits the original box; if none does, grow the box.
+    def _matched_size(self, b, dpr: float) -> int:
+        """Font size (px) that makes our font look as big as the original text.
 
-        Also reports whether the text overflows, i.e. wraps onto more lines than
-        the original had (then the extra area needs a background).
+        Measured from the original's width: lay its own words out in our font and
+        compare with how wide they were on screen. Box heights alone vary with the
+        letters a line happens to contain (g, y, p hang lower), which made sizes jump.
+        """
+        guess = b.line_height / dpr * em_per_box_height(b.text)
+        probe = self._base_font()
+        probe.setPixelSize(100)
+        fm = QFontMetrics(probe)
+        ratios = []
+        for (_, _, lw, _), text in zip(b.lines, b.line_texts or []):
+            advance = fm.horizontalAdvance(text)
+            if advance > 0 and len(text.strip()) >= 4:
+                ratios.append(lw / dpr / advance * 100)
+        size = statistics.median(ratios) if ratios else guess
+        # Don't trust a width that disagrees wildly with the height (misread text).
+        size = min(max(size, guess * 0.7), guess * 1.4)
+        return self._snap(size)
+
+    def _snap(self, size: float) -> int:
+        """Text that was the same size on screen gets exactly the same size here."""
+        for known in self._sizes:
+            if abs(size - known) <= known * 0.08:
+                return known
+        px = max(self.MIN_FONT_PX, round(size))
+        self._sizes.append(px)
+        return px
+
+    def _fit(self, text: str, box: QRect, size: int, n_lines: int = 1) -> tuple[QFont, QRect, bool]:
+        """Lay the translation out at the original's size, shrinking at most a little.
+
+        A longer translation first gets more room (sideways for a one-line label,
+        wrapping for a paragraph), and only then a slightly smaller font, never below
+        85% of the original. Also reports whether it now covers more than the
+        original did (that extra area then needs a background).
         """
         flags = int(Qt.TextFlag.TextWordWrap)
         font = self._base_font()
-        # Allow a little extra width so short UI labels don't wrap needlessly.
-        roomy = box.adjusted(0, 0, max(4, box.width() // 10), 0)
-        for size in range(start_px, self.MIN_FONT_PX - 1, -1):
-            font.setPixelSize(size)
-            br = QFontMetrics(font).boundingRect(roomy, flags, text)
-            if br.width() <= roomy.width() and br.height() <= max(box.height(), size * 1.3):
-                lines = round(br.height() / QFontMetrics(font).lineSpacing())
-                return QFont(font), roomy, lines > n_lines
-        font.setPixelSize(self.MIN_FONT_PX)
-        tall = QRect(box.x(), box.y(), roomy.width(), 100_000)
-        br = QFontMetrics(font).boundingRect(tall, flags, text)
-        return QFont(font), QRect(box.x(), box.y(), roomy.width(), br.height()), True
+        if n_lines == 1:
+            # One-line labels may run on to the right rather than shrink.
+            room = min(round(box.width() * 1.6), max(box.width(), self.width() - box.x() - 4))
+        else:
+            room = round(box.width() * 1.1)
+        room = max(room, box.width() + 4)
+        smallest = max(self.MIN_FONT_PX, round(size * 0.85))
+        br = None
+        for px in sorted({size, round(size * 0.92), smallest}, reverse=True):
+            if px < smallest:
+                continue
+            font.setPixelSize(px)
+            fm = QFontMetrics(font)
+            br = fm.boundingRect(QRect(box.x(), box.y(), room, 100_000), flags, text)
+            lines = max(1, round(br.height() / fm.lineSpacing()))
+            if lines <= n_lines:
+                rect = QRect(box.x(), box.y(), max(box.width(), br.width() + 2), max(box.height(), br.height()))
+                return QFont(font), rect, br.width() > box.width() * 1.05 + 2
+        # Still too long at the smallest size: keep that size and let it wrap onto extra lines.
+        return QFont(font), QRect(box.x(), box.y(), room, br.height()), True
 
     def translated_text(self) -> str:
         return "\n\n".join(p.text for p in self.placed)

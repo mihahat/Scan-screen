@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -22,8 +23,11 @@ class OcrError(RuntimeError):
 # the CPU and crawl; one thread each is much faster. This must NOT be set for our own
 # process: the translator uses the same threading library and would be held to 1 thread.
 _TESS_ENV = {**os.environ, "OMP_THREAD_LIMIT": "1"}
-# Don't flash a console window for every Tesseract call on Windows.
-_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+# Windows: no console window flashing for every call, and below-normal priority so
+# reading text never makes the translations lag behind while you scroll.
+_NO_WINDOW = (0x08000000 | 0x00004000) if sys.platform == "win32" else 0
+# Elsewhere: run Tesseract through `nice` for the same reason, where available.
+_NICE = ["nice", "-n", "10"] if sys.platform != "win32" and shutil.which("nice") else []
 
 
 def _no_space(ch: str) -> bool:
@@ -173,7 +177,7 @@ def run_tesseract(img: Image.Image, langs: str, psm: int, cmd: str | None = None
     img.save(buf, format="PPM")  # uncompressed: the cheapest format to write and read
     try:
         proc = subprocess.run(
-            [cmd or "tesseract", "stdin", "stdout", "-l", langs, "--psm", str(psm), "tsv"],
+            [*_NICE, cmd or "tesseract", "stdin", "stdout", "-l", langs, "--psm", str(psm), "tsv"],
             input=buf.getvalue(), capture_output=True, env=_TESS_ENV, creationflags=_NO_WINDOW, timeout=60,
         )
     except FileNotFoundError as e:
